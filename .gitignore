@@ -1,0 +1,15 @@
+﻿################################################################################
+# 此 .gitignore 文件已由 Microsoft(R) Visual Studio 自动创建。
+################################################################################
+
+/.vs/GalvoStageLink/copilot-chat/49cb0bc4/sessions
+/.vs/GalvoStageLink/CopilotIndices/17.14.1641.39856
+/.vs/GalvoStageLink/DesignTimeBuild
+/.vs/GalvoStageLink/FileContentIndex
+/.vs
+/src/GalvoStage.App/bin
+/src/GalvoStage.App/obj
+/src/GalvoStage.Core/bin
+/src/GalvoStage.Core/obj
+/tools/SmokeTest/bin
+/tools/SmokeTest/obj
