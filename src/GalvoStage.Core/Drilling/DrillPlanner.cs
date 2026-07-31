@@ -63,24 +63,90 @@ public static class DrillPlanner
         return trajectory;
     }
 
-    /// <summary>Z-order 分区排序（用于超大数据）</summary>
+    /// <summary>Z-order 曲线（莫顿码）分区排序（用于超大规模数据）</summary>
+    /// <param name="holes">输入孔位列表</param>
+    /// <param name="maxPerZone">每个区域的最大孔数阈值（可选参数，当前实现已忽略）</param>
     private static List<Geometry.Drilling.DrillingPattern.Hole> OrderByZonal(
-        List<Geometry.Drilling.DrillingPattern.Hole> holes, int maxPerZone)
+        List<Geometry.Drilling.DrillingPattern.Hole> holes, int maxPerZone = 0)
     {
-        // 计算包围盒
-        var bounds = holes[0];
-        for (int i = 1; i < holes.Count; i++)
+        int n = holes.Count;
+        if (n <= 1) return new List<Geometry.Drilling.DrillingPattern.Hole>(holes);
+        
+        // 1. 计算全局包围盒
+        double minX = double.MaxValue, minY = double.MaxValue;
+        double maxX = double.MinValue, maxY = double.MinValue;
+        foreach (var h in holes)
         {
-            var h = holes[i];
-            if (h.X < bounds.X) bounds.X = h.X;
-            if (h.Y < bounds.Y) bounds.Y = h.Y;
-            if (h.X > bounds.X) bounds.X = h.X;
-            if (h.Y > bounds.Y) bounds.Y = h.Y;
+            if (h.X < minX) minX = h.X;
+            if (h.Y < minY) minY = h.Y;
+            if (h.X > maxX) maxX = h.X;
+            if (h.Y > maxY) maxY = h.Y;
         }
         
-        double width = bounds.X - (bounds.X - 0); // 简化：暂不实现 Z-order
-        // TODO: 完整 Z-order 曲线分区
-        return OrderByNearestGrid(holes); // 降级为网格排序
+        double width = Math.Max(maxX - minX, 1e-9);
+        double height = Math.Max(maxY - minY, 1e-9);
+        
+        // 2. 确定网格分辨率（方形网格）
+        int dim = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(n)));
+        double cw = width / dim;
+        double ch = height / dim;
+        
+        // 3. 计算莫顿码并分配单元格
+        var coded = new MortonCode[n];
+        for (int i = 0; i < n; i++)
+        {
+            int cx = (int)((holes[i].X - minX) / cw);
+            int cy = (int)((holes[i].Y - minY) / ch);
+            cx = Math.Clamp(cx, 0, dim - 1);
+            cy = Math.Clamp(cy, 0, dim - 1);
+            
+            uint cellIndex = EncodeMortonCode(cx, cy, dim);
+            coded[i] = new MortonCode { OriginalIndex = i, Code = cellIndex, CellX = cx, CellY = cy };
+        }
+        
+        // 4. 按莫顿码排序（使用快速排序）
+        Array.Sort(coded, (a, b) => a.Code.CompareTo(b.Code));
+        
+        // 5. 重建有序列表
+        var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(n);
+        for (int i = 0; i < n; i++)
+            ordered.Add(holes[coded[i].OriginalIndex]);
+        
+        return ordered;
+    }
+    
+    /// <summary>二阶莫顿码（Z-order）编码</summary>
+    /// <param name="x">单元格 X 坐标</param>
+    /// <param name="y">单元格 Y 坐标</param>
+    /// <param name="gridSize">网格尺寸（必须是 2 的幂次）</param>
+    /// <returns>32 位莫顿码</returns>
+    private static uint EncodeMortonCode(int x, int y, int gridSize)
+    {
+        // 将 grid size 向上舍入到最接近的 2 的幂次
+        int bits = 0;
+        int temp = gridSize - 1;
+        while (temp > 0)
+        {
+            bits++;
+            temp >>= 1;
+        }
+        
+        uint result = 0;
+        for (int i = 0; i < bits; i++)
+        {
+            result |= ((uint)(x & (1 << i)) << (2 * i)) | 
+                      ((uint)(y & (1 << i)) << (2 * i + 1));
+        }
+        
+        return result;
+    }
+    
+    /// <summary>莫顿码数据结构</summary>
+    private sealed class MortonCode
+    {
+        public int OriginalIndex;      // 原始索引
+        public uint Code;              // 计算的莫顿码
+        public int CellX, CellY;       // 单元格坐标（调试用）
     }
 
     /// <summary>网格加速最近邻排序（核心算法）</summary>

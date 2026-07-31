@@ -2,6 +2,10 @@ using GalvoStage.Core.Dxf;
 using GalvoStage.Core.PathPlanning;
 using GalvoStage.Core.Simulation;
 
+// 附加验证：dotnet run -- --zorder 运行 Z-order 莫顿排序基准
+if (args.Length > 0 && args[0] == "--zorder")
+    return SmokeTest.ZOrderBenchmark.Run();
+
 // 冒烟测试：DXF解析 → 采样 → 频率分解 → 联动仿真（对比补偿开/关）
 string dxf = args.Length > 0 ? args[0] : @"..\..\src\GalvoStage.App\Samples\demo.dxf";
 var polylines = DxfParser.ParseFile(dxf);
