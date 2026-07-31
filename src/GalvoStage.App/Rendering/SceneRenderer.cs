@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using GalvoStage.App.ViewModels;
 using GalvoStage.Core.Geometry;
 using SkiaSharp;
@@ -37,6 +38,13 @@ public sealed class ViewTransform
         OffsetX = width / 2 - cx * Scale;
         OffsetY = height / 2 + cy * Scale;
     }
+
+    /// <summary>将世界原点 (0,0) 置于画布中心（保持当前缩放）</summary>
+    public void CenterOrigin(float width, float height)
+    {
+        OffsetX = width / 2;
+        OffsetY = height / 2;
+    }
 }
 
 /// <summary>SkiaSharp 场景绘制：图形/分解路径/实时加工/FOV/误差曲线</summary>
@@ -50,22 +58,52 @@ public static class SceneRenderer
     private static readonly SKColor SpotColor = new(0xFF, 0x3B, 0x30);
     private static readonly SKColor FovColor = new(0x2E, 0xCC, 0x71);
     private static readonly SKColor GalvoLineColor = new(0xFF, 0xD6, 0x0A);
+    private static readonly SKColor DrillPointColor = new(0xFF, 0x5C, 0xB8);   // 紫红点 - 钻孔位置
+    private static readonly SKColor DrillTrajColor = new(0xF9, 0xBE, 0x5F);     // 橙色线 - 钻孔顺序
+    private static readonly SKColor RulerBg = new(0x1A, 0x1A, 0x24);
+    private static readonly SKColor RulerLine = new(0x4A, 0x4E, 0x68);
+    private static readonly SKColor AxisColor = new(0x3F, 0x7A, 0x5E);   // XY 坐标轴（绿色）
+    private static readonly SKColor RulerText = new SKColor(0x7D, 0x81, 0x95);
+    private static readonly SKColor MouseHlColor = new(0x4C, 0x8D, 0xFF);
+    private static readonly SKColor MouseBgColor = new SKColor(0x1F, 0x26, 0x3E).WithAlpha(240);
+    private static readonly SKColor MouseTextColor = new(0xEF, 0xF2, 0xFA);
 
-    public static void DrawScene(SKCanvas canvas, MainViewModel vm, ViewTransform vt, float width, float height)
+    // ---------------- LOD 参数（超大数据时启用，小数据零回归） ----------------
+    private const int LodContourThreshold = 50_000;   // 轮廓数超过此值才启用 LOD 绘制
+    private const int FullPathBudget = 20_000;        // 单帧完整绘制的轮廓上限，超出退化为点
+    private const float SubPixelSizePx = 2f;          // 屏幕尺寸小于该像素的轮廓只画点
+    private const int DedupCellPx = 2;                // 点云屏幕去重网格粒度(px)
+    private const int PathFlushBatch = 4_096;         // 共享 SKPath 每积累多少条轮廓 flush 一次
+
+    // 复用缓冲（仅 UI 线程渲染时使用，避免每帧大分配）
+    private static byte[] _dedupCells = Array.Empty<byte>();
+
+    public static void DrawScene(SKCanvas canvas, MainViewModel vm, ViewTransform vt, float width, float height, (double X, double Y)? mouseWorld = null)
     {
         canvas.Clear(BgColor);
         DrawGrid(canvas, vt, width, height);
+        DrawRulers(canvas, vt, width, height);
 
         using var paint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1f };
 
-        // 1) 原始 DXF 图形
+        // 1) 原始 DXF 图形（超大数据走视口裁剪 + 点云 LOD）
         paint.Color = GeomColor;
         paint.StrokeWidth = 1f;
-        foreach (var pl in vm.Polylines)
-            DrawPolyline(canvas, paint, vt, pl);
+        var cache = vm.GeometryCache;
+        if (cache != null && vm.Polylines.Count > LodContourThreshold && cache.Count == vm.Polylines.Count)
+            DrawPolylinesLod(canvas, paint, vt, vm.Polylines, cache, width, height);
+        else
+            foreach (var pl in vm.Polylines)
+                DrawPolyline(canvas, paint, vt, pl);
 
         var plan = vm.Plan;
         var sim = vm.Sim;
+        var drillPattern = vm.DrillingPattern;
+        var drillTraj = vm.DrillingTrajectory;
+
+        // 1.5) PCB 钻孔点（紫红点云，带视口裁剪 + 屏幕网格去重 LOD）
+        if (drillPattern != null && drillPattern.Holes.Count > 0)
+            DrawDrillingPattern(canvas, paint, vt, drillPattern, width, height);
 
         // 2) 平台低频路径（分解结果）
         if (plan != null)
@@ -75,7 +113,11 @@ public static class SceneRenderer
             DrawSampled(canvas, paint, vt, plan.StageX, plan.StageY, 0, plan.Count);
         }
 
-        // 3) 实时加工轨迹
+        // 3) PCB 钻孔顺序轨迹（橙色连线）
+        if (drillTraj != null && drillTraj.Moves.Count > 1)
+            DrawDrillingTrajectory(canvas, paint, vt, drillTraj);
+
+        // 4) 实时加工轨迹
         if (sim != null && sim.Index > 1)
         {
             int n = sim.Index;
@@ -91,9 +133,198 @@ public static class SceneRenderer
             DrawLiveMarkers(canvas, vt, vm, sim);
         }
 
+        DrawMouseCursorCrosshair(canvas, vt, width, height, mouseWorld);
         DrawLegend(canvas, width);
     }
 
+    // ------------------ XY 标尺与鼠标位置高亮 --------------------
+
+    /// <summary>绘制 XY 轴标尺 + 网格刻度线（X 轴在顶部，Y 轴在左侧）</summary>
+    private static void DrawRulers(SKCanvas canvas, ViewTransform vt, float width, float height)
+    {
+        var (wx0, wy1) = vt.ToWorld(0, 0);
+        var (wx1, wy0) = vt.ToWorld(width, height);
+
+        using var paint = new SKPaint { IsAntialias = true };
+        using var textPaint = new SKPaint
+        {
+            Color = RulerText,
+            TextSize = 11f,
+            IsAntialias = true,
+            Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI", SKFontStyle.Normal)
+        };
+
+        // X 轴标尺 (顶部 40px) - 深色背景
+        canvas.DrawRect(0, 0, width, 40, new SKPaint { Color = RulerBg });
+        // X 轴边框线
+        using var border = new SKPaint { Color = RulerLine.WithAlpha(120), StrokeWidth = 1.5f };
+        canvas.DrawLine(0, 40, width, 40, border);
+
+        int maxMajorTicks = Math.Max(3, (int)(width / 40));
+        double xSpan = wx1 - wx0;
+        if (xSpan <= 1e-9) return;
+        double xStep = xSpan / maxMajorTicks;
+        double xNice = NiceStep(xStep);
+
+        for (double x = Math.Floor(wx0 / xNice) * xNice; x <= wx1 + xNice/2; x += xNice)
+        {
+            var pos = vt.ToScreen(x, 0);
+            // 主刻度（长）+ 数字标签 - 紧贴标尺下沿向上
+            paint.Color = RulerLine;
+            paint.StrokeWidth = 2;
+            canvas.DrawLine(pos.X, 40, pos.X, 28, paint);
+
+            // 次刻度（短）
+            double subX = x + xNice * 0.2;
+            if (subX <= wx1)
+            {
+                var subPos = vt.ToScreen(subX, 0);
+                canvas.DrawLine(subPos.X, 40, subPos.X, 34, 
+                    new SKPaint { Color = RulerLine, StrokeWidth = 1 });
+            }
+
+            // 坐标文字：居中对齐并带深色底
+            string txt = $"{x:+0.#;-0.#}";
+            float tw = textPaint.MeasureText(txt);
+            canvas.DrawText(txt, pos.X - tw / 2, 22, textPaint);
+        }
+
+        // Y 轴标尺 (左侧 40px) - 深色背景
+        canvas.DrawRect(0, 0, 40, height, new SKPaint { Color = RulerBg });
+        // Y 轴边框线
+        using var borderY = new SKPaint { Color = RulerLine.WithAlpha(120), StrokeWidth = 1.5f };
+        canvas.DrawLine(40, 0, 40, height, borderY);
+
+        int yCount = Math.Min(100, (int)(height / 28));
+        double ySpan = wy1 - wy0;
+        if (ySpan <= 1e-9) return;
+        double yStep = ySpan / yCount;
+        double yNice = NiceStep(yStep);
+
+        for (double y = Math.Floor(wy0 / yNice) * yNice; y <= wy1 + yNice/2; y += yNice)
+        {
+            var pos = vt.ToScreen(0, y);
+            paint.Color = RulerLine;
+            paint.StrokeWidth = 2;
+            canvas.DrawLine(40, pos.Y, 28, pos.Y, paint); // 紧贴标尺右沿向左
+
+            // 次刻度（短）
+            double subY = y + yNice * 0.2;
+            if (subY <= wy1)
+            {
+                var subPos = vt.ToScreen(0, subY);
+                canvas.DrawLine(40, subPos.Y, 34, subPos.Y, 
+                    new SKPaint { Color = RulerLine, StrokeWidth = 1 });
+            }
+
+            // 坐标文字：居中对齐
+            string txt = $"{y:+0.#;-0.#}";
+            canvas.DrawText(txt, 2, pos.Y + 4, textPaint);
+        }
+
+        // 坐标轴标签
+        using var axisLabel = new SKPaint 
+        { 
+            Color = RulerLine.WithAlpha(200), 
+            TextSize = 12f, 
+            IsAntialias = true 
+        };
+        canvas.DrawText("X 轴 (mm)", width / 2 - textPaint.MeasureText("X 轴 (mm)") / 2, 12, axisLabel);       // 顶部居中
+        canvas.DrawText("Y 轴 (mm)", 2, 54, axisLabel);     // 左侧标尺顶端下方
+    }
+
+    /// <summary>鼠标位置十字线与坐标数值（带 Alpha 通道支持）</summary>
+    public static void DrawMouseCursorCrosshair(
+        SKCanvas canvas, ViewTransform vt, float width, float height, (double X, double Y)? mouseWorld)
+    {
+        if (mouseWorld == null || double.IsNaN(mouseWorld.Value.X) || double.IsNaN(mouseWorld.Value.Y))
+            return;
+
+        var p = vt.ToScreen(mouseWorld.Value.X, mouseWorld.Value.Y);
+        if (p.X < -100 || p.X > width + 100 || p.Y < -100 || p.Y > height + 100)
+            return; // 超出视口太远则不绘
+
+        // 仅在十字中心点显示
+        using var centerDot = new SKPaint
+        {
+            Color = MouseHlColor.WithAlpha(255),
+            Style = SKPaintStyle.Fill
+        };
+        canvas.DrawCircle(p.X, p.Y, 3.5f, centerDot);
+
+        // X 轴方向：鼠标在画布 X 范围内时，在顶部 X 标尺上显示实时垂直刻度
+        if (p.X >= 40 && p.X <= width)
+        {
+            using var vertLine = new SKPaint
+            {
+                Color = MouseHlColor.WithAlpha(220),
+                StrokeWidth = 2f,
+                IsAntialias = true
+            };
+            // 在顶部标尺区域内画一小段垂直刻度线（对齐鼠标 X 位置）
+            canvas.DrawLine(p.X, 40, p.X, 20, vertLine);
+        }
+
+        // Y 轴方向：鼠标在画布 Y 范围内时，在左侧 Y 标尺上显示实时水平刻度
+        if (p.Y >= 40 && p.Y <= height)
+        {
+            using var horizLine = new SKPaint
+            {
+                Color = MouseHlColor.WithAlpha(220),
+                StrokeWidth = 2f,
+                IsAntialias = true
+            };
+            // 在左侧标尺区域内画一小段水平刻度线（对齐鼠标 Y 位置）
+            canvas.DrawLine(40, p.Y, 20, p.Y, horizLine);
+        }
+
+        // 坐标气泡框优化：深色渐变背景 + 圆角矩形
+        string label = $"X={mouseWorld.Value.X:F3}mm  Y={mouseWorld.Value.Y:F3}mm";
+        using var textPaint = new SKPaint
+        {
+            Color = MouseTextColor,
+            TextSize = 12f,
+            IsAntialias = true,
+            Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI", SKFontStyle.Normal)
+        };
+
+        // 测量文字宽度
+        float textWidth = textPaint.MeasureText(label);
+        float textHeight = textPaint.TextSize;
+
+        // 气泡位置和尺寸（十字线左侧上方）
+        float w = textWidth + 14f;
+        float h = textHeight + 12f;
+        float bx = Math.Max(48f, Math.Min(p.X - w - 4, width - w - 48f));
+        float by = Math.Max(48f, Math.Min(p.Y - h - 6, height - h - 6f));
+
+        // 填充背景（深色圆角背景）
+        using var bgPaint = new SKPaint { Color = MouseBgColor, Style = SKPaintStyle.Fill };
+        canvas.DrawRoundRect(bx, by, w, h, 6, 6, bgPaint);
+
+        // 气泡边框（亮色高光）
+        using var strokePaint = new SKPaint 
+        { 
+            Color = MouseHlColor.WithAlpha(255), 
+            StrokeWidth = 1.5f, 
+            IsAntialias = true 
+        };
+        canvas.DrawRoundRect(bx, by, w, h, 6, 6, strokePaint);
+
+        // 添加阴影效果（可选增强版）
+        using var shadowPaint = new SKPaint 
+        { 
+            Color = MouseBgColor.WithAlpha(180),
+            Style = SKPaintStyle.Fill
+        };
+        canvas.DrawRoundRect(bx + 2f, by + 2f, w, h, 6, 6, shadowPaint);
+
+        // 文字居中显示
+        textPaint.Color = MouseTextColor;
+        canvas.DrawText(label, bx + 4, by + h - 6, textPaint);
+    }
+
+    /// <summary>背景网格 + XY 坐标轴（世界原点十字轴线，绿色高亮）</summary>
     private static void DrawGrid(SKCanvas canvas, ViewTransform vt, float width, float height)
     {
         using var paint = new SKPaint { Color = GridColor, StrokeWidth = 1 };
@@ -110,11 +341,29 @@ public static class SceneRenderer
             var p = vt.ToScreen(0, y);
             canvas.DrawLine(0, p.Y, width, p.Y, paint);
         }
-        // 坐标原点
-        using var axis = new SKPaint { Color = GridColor.WithAlpha(255), StrokeWidth = 1.5f };
+
+        // XY 坐标轴：世界 X=0 / Y=0 贯穿画布的绿色轴线
+        using var axis = new SKPaint { Color = AxisColor.WithAlpha(180), StrokeWidth = 1.6f, IsAntialias = true };
         var o = vt.ToScreen(0, 0);
-        canvas.DrawLine(o.X - 12, o.Y, o.X + 12, o.Y, axis);
-        canvas.DrawLine(o.X, o.Y - 12, o.X, o.Y + 12, axis);
+        if (o.X >= 0 && o.X <= width)
+            canvas.DrawLine(o.X, 0, o.X, height, axis);   // Y 轴（垂直）
+        if (o.Y >= 0 && o.Y <= height)
+            canvas.DrawLine(0, o.Y, width, o.Y, axis);    // X 轴（水平）
+
+        // 原点标记：小圆圈 + 十字
+        if (o.X >= -20 && o.X <= width + 20 && o.Y >= -20 && o.Y <= height + 20)
+        {
+            using var originPaint = new SKPaint
+            {
+                Color = AxisColor,
+                StrokeWidth = 1.6f,
+                IsAntialias = true,
+                Style = SKPaintStyle.Stroke
+            };
+            canvas.DrawCircle(o.X, o.Y, 5f, originPaint);
+            canvas.DrawLine(o.X - 10, o.Y, o.X + 10, o.Y, originPaint);
+            canvas.DrawLine(o.X, o.Y - 10, o.X, o.Y + 10, originPaint);
+        }
     }
 
     private static double NiceStep(double raw)
@@ -134,6 +383,226 @@ public static class SceneRenderer
             path.LineTo(vt.ToScreen(pl.Points[i].X, pl.Points[i].Y));
         if (pl.Closed) path.Close();
         canvas.DrawPath(path, paint);
+    }
+
+    /// <summary>
+    /// 超大数据 LOD 绘制：视口外轮廓直接跳过；视口内按屏幕尺寸分级——
+    /// 亚像素轮廓合并为点云（带屏幕网格去重），较大轮廓合并进共享 SKPath 分批绘制，
+    /// 且受全帧路径预算限制，超预算部分退化为点。帧开销由视口内容而非总量决定。
+    /// 收集阶段并行扫描包围盒数组（去重网格允许良性竞争，仅可能产生少量重复点），
+    /// Skia 绘制仍在调用线程串行执行。
+    /// </summary>
+    private static void DrawPolylinesLod(SKCanvas canvas, SKPaint paint, ViewTransform vt,
+        List<PathPolyline> polylines, SceneGeometryCache cache, float width, float height)
+    {
+        // 视口的世界坐标范围（世界 Y 向上：屏幕顶部是 maxY）
+        var (wl, wt) = vt.ToWorld(0, 0);
+        var (wr, wb) = vt.ToWorld(width, height);
+        float vx0 = (float)wl, vx1 = (float)wr, vy0 = (float)wb, vy1 = (float)wt;
+        double scale = vt.Scale;
+
+        // 点云去重网格（覆盖整个视口，DedupCellPx 一格）
+        int gw = (int)(width / DedupCellPx) + 2;
+        int gh = (int)(height / DedupCellPx) + 2;
+        int cells = gw * gh;
+        if (_dedupCells.Length < cells) _dedupCells = new byte[cells];
+        else Array.Clear(_dedupCells, 0, cells);
+        var dedup = _dedupCells;
+
+        float[] minX = cache.MinX, minY = cache.MinY, maxX = cache.MaxX, maxY = cache.MaxY;
+        int n = cache.Count;
+        var bigAll = new List<int>();          // 需完整绘制的轮廓索引
+        var ptsAll = new List<SKPoint>();      // 点云
+        object gate = new();
+
+        // 按块分区并行，块内跑紧循环，避免逐元素委托开销
+        const int chunk = 1 << 16;
+        int chunkCount = (n + chunk - 1) / chunk;
+        double offX = vt.OffsetX, offY = vt.OffsetY;
+
+        System.Threading.Tasks.Parallel.For(0, chunkCount,
+            () => (big: new List<int>(), pts: new List<SKPoint>()),
+            (ci, _, acc) =>
+            {
+                int i0 = ci * chunk, i1 = Math.Min(i0 + chunk, n);
+                for (int i = i0; i < i1; i++)
+                {
+                    // 视口裁剪
+                    if (maxX[i] < vx0 || minX[i] > vx1 || maxY[i] < vy0 || minY[i] > vy1) continue;
+
+                    float sizeWorld = Math.Max(maxX[i] - minX[i], maxY[i] - minY[i]);
+                    if (sizeWorld * scale >= SubPixelSizePx)
+                    {
+                        acc.big.Add(i);
+                        continue;
+                    }
+                    // 点云：包围盒中心 → 屏幕坐标，2px 网格去重（并行竞争无害）
+                    float sx = (float)(offX + (minX[i] + maxX[i]) * 0.5 * scale);
+                    float sy = (float)(offY - (minY[i] + maxY[i]) * 0.5 * scale);
+                    if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+                    int cell = (int)(sy / DedupCellPx) * gw + (int)(sx / DedupCellPx);
+                    if (dedup[cell] != 0) continue;
+                    dedup[cell] = 1;
+                    acc.pts.Add(new SKPoint(sx, sy));
+                }
+                return acc;
+            },
+            acc =>
+            {
+                lock (gate)
+                {
+                    bigAll.AddRange(acc.big);
+                    ptsAll.AddRange(acc.pts);
+                }
+            });
+
+        // 完整绘制（预算内），超预算部分退化为包围盒中心点。
+        // 按索引排序保证帧间确定性，避免超预算时闪烁。
+        bigAll.Sort();
+        using var batch = new SKPath();
+        int batched = 0;
+        for (int k = 0; k < bigAll.Count; k++)
+        {
+            int i = bigAll[k];
+            if (k < FullPathBudget)
+            {
+                AppendPolyline(batch, vt, polylines[i]);
+                if (++batched >= PathFlushBatch)
+                {
+                    canvas.DrawPath(batch, paint);
+                    batch.Reset();
+                    batched = 0;
+                }
+            }
+            else
+            {
+                ptsAll.Add(vt.ToScreen((minX[i] + maxX[i]) * 0.5, (minY[i] + maxY[i]) * 0.5));
+            }
+        }
+        if (batched > 0) canvas.DrawPath(batch, paint);
+        if (ptsAll.Count > 0) FlushPoints(canvas, paint, ptsAll.ToArray(), ptsAll.Count);
+    }
+
+    /// <summary>
+    /// PCB 钻孔点渲染：视口裁剪 + 屏幕网格去重，600 万孔也能流畅平移缩放。
+    /// 放大到孔间距 > 6px 时画小圆圈，否则退化为像素方点点云。
+    /// </summary>
+    private static void DrawDrillingPattern(SKCanvas canvas, SKPaint paint, ViewTransform vt,
+        Core.Geometry.Drilling.DrillingPattern pattern, float width, float height)
+    {
+        var holes = pattern.Holes;
+        int n = holes.Count;
+
+        // 视口世界范围
+        var (wl, wt) = vt.ToWorld(0, 0);
+        var (wr, wb) = vt.ToWorld(width, height);
+        double vx0 = wl, vx1 = wr, vy0 = wb, vy1 = wt;
+        double scale = vt.Scale, offX = vt.OffsetX, offY = vt.OffsetY;
+
+        // 估算平均孔间距（像素）决定绘制级别
+        bool drawCircles = false;
+        if (pattern.Bounds is { } b && n > 0)
+        {
+            double area = Math.Max((b.MaxX - b.MinX) * (b.MaxY - b.MinY), 1e-9);
+            double avgSpacingPx = Math.Sqrt(area / n) * scale;
+            drawCircles = avgSpacingPx > 6;
+        }
+
+        // 屏幕网格去重（复用 LOD 缓冲）
+        int gw = (int)(width / DedupCellPx) + 2;
+        int gh = (int)(height / DedupCellPx) + 2;
+        int cells = gw * gh;
+        if (_dedupCells.Length < cells) _dedupCells = new byte[cells];
+        else Array.Clear(_dedupCells, 0, cells);
+        var dedup = _dedupCells;
+
+        var pts = new List<SKPoint>(Math.Min(n, 200_000));
+        for (int i = 0; i < n; i++)
+        {
+            var h = holes[i];
+            if (h.X < vx0 || h.X > vx1 || h.Y < vy0 || h.Y > vy1) continue;
+            float sx = (float)(offX + h.X * scale);
+            float sy = (float)(offY - h.Y * scale);
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+            if (!drawCircles)
+            {
+                int cell = (int)(sy / DedupCellPx) * gw + (int)(sx / DedupCellPx);
+                if (dedup[cell] != 0) continue;
+                dedup[cell] = 1;
+            }
+            pts.Add(new SKPoint(sx, sy));
+            if (drawCircles && pts.Count > 60_000) drawCircles = false;   // 视口内过多则退化
+        }
+
+        var saved = (paint.Color, paint.Style, paint.StrokeWidth, paint.IsAntialias);
+        if (drawCircles)
+        {
+            paint.Color = DrillPointColor;
+            paint.Style = SKPaintStyle.Stroke;
+            paint.StrokeWidth = 1.2f;
+            paint.IsAntialias = true;
+            float r = Math.Clamp((float)(scale * 0.15), 2f, 5f);
+            foreach (var p in pts)
+                canvas.DrawCircle(p, r, paint);
+        }
+        else if (pts.Count > 0)
+        {
+            paint.Color = DrillPointColor;
+            FlushPoints(canvas, paint, pts.ToArray(), pts.Count);
+        }
+        (paint.Color, paint.Style, paint.StrokeWidth, paint.IsAntialias) = saved;
+    }
+
+    /// <summary>钻孔顺序轨迹：按规划顺序连线（降采样防卡顿）</summary>
+    private static void DrawDrillingTrajectory(SKCanvas canvas, SKPaint paint, ViewTransform vt,
+        Core.Drilling.DrillPlanner.DrillingTrajectory traj)
+    {
+        var moves = traj.Moves;
+        int n = moves.Count;
+        if (n < 2) return;
+        int stride = Math.Max(1, n / 20000);
+        var saved = (paint.Color, paint.StrokeWidth);
+        paint.Color = DrillTrajColor.WithAlpha(140);
+        paint.StrokeWidth = 1f;
+        using var path = new SKPath();
+        path.MoveTo(vt.ToScreen(moves[0].Position.X, moves[0].Position.Y));
+        for (int i = stride; i < n; i += stride)
+            path.LineTo(vt.ToScreen(moves[i].Position.X, moves[i].Position.Y));
+        canvas.DrawPath(path, paint);
+        (paint.Color, paint.StrokeWidth) = saved;
+    }
+
+    private static void FlushPoints(SKCanvas canvas, SKPaint paint, SKPoint[] buf, int count)
+    {
+        var savedCap = paint.StrokeCap;
+        float savedWidth = paint.StrokeWidth;
+        bool savedAA = paint.IsAntialias;
+        paint.StrokeCap = SKStrokeCap.Square;
+        paint.StrokeWidth = 1.6f;
+        paint.IsAntialias = false;   // 亚像素方点无需抗锯齿，可显著降低批量绘制开销
+        if (count < buf.Length)
+        {
+            var slice = new SKPoint[count];
+            Array.Copy(buf, slice, count);
+            canvas.DrawPoints(SKPointMode.Points, slice, paint);
+        }
+        else
+        {
+            canvas.DrawPoints(SKPointMode.Points, buf, paint);
+        }
+        paint.StrokeCap = savedCap;
+        paint.StrokeWidth = savedWidth;
+        paint.IsAntialias = savedAA;
+    }
+
+    private static void AppendPolyline(SKPath path, ViewTransform vt, PathPolyline pl)
+    {
+        var pts = pl.Points;
+        if (pts.Count < 2) return;
+        path.MoveTo(vt.ToScreen(pts[0].X, pts[0].Y));
+        for (int i = 1; i < pts.Count; i++)
+            path.LineTo(vt.ToScreen(pts[i].X, pts[i].Y));
+        if (pl.Closed) path.Close();
     }
 
     private static void DrawSampled(SKCanvas canvas, SKPaint paint, ViewTransform vt,
@@ -212,13 +681,15 @@ public static class SceneRenderer
         (SKColor color, string label)[] items =
         {
             (GeomColor, "原始图形"),
+            (DrillPointColor, "钻孔位置"),
+            (DrillTrajColor, "钻孔顺序轨迹"),
             (StageColor, "平台指令路径(低频)"),
             (StageActColor, "平台实际轨迹"),
             (SpotColor, "激光落点(出光)"),
             (FovColor, "振镜视场"),
             (GalvoLineColor, "振镜偏摆矢量"),
         };
-        float x = 16, y = 24;
+        float x = 50, y = 60;
         foreach (var (color, label) in items)
         {
             using var sw = new SKPaint { Color = color, StrokeWidth = 4, IsAntialias = true };

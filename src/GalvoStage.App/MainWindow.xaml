@@ -181,10 +181,20 @@
                                 <StackPanel Orientation="Horizontal">
                                     <Button x:Name="BtnImport" Content="导入 DXF…" Click="OnImportClick"
                                             Style="{StaticResource RoundButton}" Background="#2F5AA8"/>
+                                    <Button x:Name="BtnDrill" Content="导入钻孔 DXF…" Click="OnImportDrillClick"
+                                            Style="{StaticResource RoundButton}" Background="#7B3F9E"/>
                                     <Button x:Name="BtnDemo" Content="加载示例图形" Click="OnLoadDemoClick"
                                             Style="{StaticResource RoundButton}"/>
                                 </StackPanel>
                                 <TextBlock Text="{Binding FileInfo}" Style="{StaticResource InfoText}" Margin="0,8,0,0"/>
+                                <TextBlock Text="{Binding DrillingInfo}" Style="{StaticResource InfoText}" 
+                                           Foreground="#B4A8D6" Margin="0,4,0,0"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <Button x:Name="BtnPlanDrill" Content="规划钻孔路径" Click="OnPlanDrillClick"
+                                            Style="{StaticResource RoundButton}" Background="#5A3F8E"/>
+                                    <Button x:Name="BtnExportGCode" Content="导出 G 代码…" Click="OnExportGCodeClick"
+                                            Style="{StaticResource RoundButton}" Background="#3F7A5E"/>
+                                </StackPanel>
                             </StackPanel>
                         </Border>
 
@@ -271,9 +281,15 @@
                     <RowDefinition Height="180"/>
                 </Grid.RowDefinitions>
 
-                <skia:SKElement x:Name="MainCanvas" Grid.Row="0" PaintSurface="OnPaintMain"
-                                MouseWheel="OnCanvasWheel" MouseDown="OnCanvasMouseDown"
-                                MouseMove="OnCanvasMouseMove" MouseUp="OnCanvasMouseUp"/>
+                <!-- 带标尺的画布容器 -->
+                <Grid Grid.Row="0">
+
+                    <!-- 主画布（带坐标高亮） -->
+                    <skia:SKElement x:Name="MainCanvas" PaintSurface="OnPaintMain"
+                                    MouseWheel="OnCanvasWheel" MouseDown="OnCanvasMouseDown"
+                                    MouseMove="OnCanvasMouseMoveUpdatePos" MouseUp="OnCanvasMouseUp"/>
+                </Grid>
+
                 <Border Grid.Row="1" BorderBrush="{StaticResource CardBorder}" BorderThickness="0,1,0,0">
                     <skia:SKElement x:Name="ChartCanvas" PaintSurface="OnPaintChart"/>
                 </Border>

@@ -13,3 +13,5 @@
 /src/GalvoStage.Core/obj
 /tools/SmokeTest/bin
 /tools/SmokeTest/obj
+/tools/ParseBench/bin/Release/net6.0
+/tools/ParseBench/obj
