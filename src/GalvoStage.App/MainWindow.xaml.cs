@@ -124,6 +124,7 @@ public partial class MainWindow : Window
         try
         {
             _vm.ImportDxf(dlg.FileName);
+
             _fitPending = true;
             InvalidateCanvases();
         }
