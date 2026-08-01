@@ -29,14 +29,18 @@ public static class PathSampler
     /// <summary>轮廓数超过此值时最近邻排序改用空间网格加速</summary>
     private const int GridOrderThreshold = 5_000;
 
+    /// <param name="cornerAngleDeg">尖角保真阈值：内角小于该值的折线顶点强制作为采样点（顶点吸附），
+    /// 避免尖角被等时采样弦切。默认 150°；设为 ≥180 可关闭该特性。</param>
     public static SampledTrajectory Sample(IReadOnlyList<PathPolyline> polylines,
-        double feedSpeed, double rapidSpeed, double sampleRate)
+        double feedSpeed, double rapidSpeed, double sampleRate, double cornerAngleDeg = 150)
     {
         var ordered = OrderByNearest(polylines);
         var xs = new List<double>(1 << 16);
         var ys = new List<double>(1 << 16);
         var laser = new List<bool>(1 << 16);
         double dt = 1.0 / sampleRate;
+        bool snapCorners = cornerAngleDeg < 180;
+        double cornerCos = Math.Cos(cornerAngleDeg * Math.PI / 180.0);
 
         Vec2 cur = ordered.Count > 0 ? ordered[0].Points[0] : Vec2.Zero;
         double residual = 0;   // 上一段剩余的采样相位距离
@@ -55,6 +59,15 @@ public static class PathSampler
             {
                 residual = InterpolateSegment(cur, pts[i], feedSpeed * dt, residual, xs, ys, laser, true);
                 cur = pts[i];
+
+                // 尖角保真：顶点非采样点时，若转角够尖则强制吸附该顶点并重置采样相位
+                if (snapCorners && TryGetCornerNeighbor(pts, i, pl.Closed, out Vec2 nextPt)
+                    && IsSharpCorner(pts[i - 1], cur, nextPt, cornerCos))
+                {
+                    if (xs.Count == 0 || xs[^1] != cur.X || ys[^1] != cur.Y)
+                    { xs.Add(cur.X); ys.Add(cur.Y); laser.Add(true); }
+                    residual = 0;   // 从尖角顶点重新计相位（局部牺牲等时性换取保真）
+                }
             }
         }
         // 末尾补一个终点采样
@@ -86,6 +99,26 @@ public static class PathSampler
             s += step;
         }
         return step - (s - len);         // 新的剩余相位
+    }
+
+    /// <summary>取顶点 pts[i] 的「下一个」邻居（闭合轮廓在末点回绕到 pts[1]）；开折线末端无邻居返回 false。</summary>
+    private static bool TryGetCornerNeighbor(List<Vec2> pts, int i, bool closed, out Vec2 next)
+    {
+        if (i + 1 <= pts.Count - 1) { next = pts[i + 1]; return true; }
+        if (closed && pts.Count > 2) { next = pts[1]; return true; }   // pts[^1]==pts[0]，回绕取 pts[1]
+        next = default; return false;
+    }
+
+    /// <summary>判断 prev→vertex→next 在 vertex 处的内角是否小于阈值（cos 大于阈值即为尖角）。</summary>
+    private static bool IsSharpCorner(Vec2 prev, Vec2 vertex, Vec2 next, double cosThreshold)
+    {
+        double v1x = prev.X - vertex.X, v1y = prev.Y - vertex.Y;
+        double v2x = next.X - vertex.X, v2y = next.Y - vertex.Y;
+        double l1 = Math.Sqrt(v1x * v1x + v1y * v1y);
+        double l2 = Math.Sqrt(v2x * v2x + v2y * v2y);
+        if (l1 < 1e-12 || l2 < 1e-12) return false;
+        double cos = (v1x * v2x + v1y * v2y) / (l1 * l2);
+        return cos > cosThreshold;   // 内角 < 阈值 ⟹ 尖角
     }
 
     /// <summary>
