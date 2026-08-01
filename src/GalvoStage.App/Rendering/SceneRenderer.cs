@@ -295,8 +295,10 @@ public static class SceneRenderer
         // 气泡位置和尺寸（十字线左侧上方）
         float w = textWidth + 14f;
         float h = textHeight + 12f;
-        float bx = Math.Max(48f, Math.Min(p.X - w - 4, width - w - 48f));
-        float by = Math.Max(48f, Math.Min(p.Y - h - 6, height - h - 6f));
+        //float bx = Math.Max(48f, Math.Min(p.X - w - 4, width - w - 48f));
+        //float by = Math.Max(48f, Math.Min(p.Y - h - 6, height - h - 6f));
+        float bx = width-190;
+        float by =  height-35;
 
         // 填充背景（深色圆角背景）
         using var bgPaint = new SKPaint { Color = MouseBgColor, Style = SKPaintStyle.Fill };
