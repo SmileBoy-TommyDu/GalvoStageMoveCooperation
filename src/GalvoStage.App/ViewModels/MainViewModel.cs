@@ -177,32 +177,54 @@ public sealed class MainViewModel : INotifyPropertyChanged
         pattern.RecomputeBounds();
     }
 
-    /// <summary>路径分解：采样 + 频率分解（超大轮廓集合先空间均匀抽稀）</summary>
+    /// <summary>
+    /// 路径分解：采样 + 频率分解。为兼顾“交互性能”与“加工完整性”，采用两阶段策略：
+    ///   ① 参数估计：轮廓数超阀时，仅在空间均匀抽稀的代表子集上跑 DecomposeAuto（昂贵的二分迭代只跑子集），仅用于求截止频率；
+    ///   ② 加工指令：对全部轮廓采样后，用固定截止频率做单次全量分解，保证每一条轮廓都被加工、不丢弃。
+    /// 抽稀只影响“估参”这一步，绝不影响最终运动指令。
+    /// </summary>
     public void Decompose()
     {
         if (Polylines.Count == 0) return;
 
-        var source = Polylines;
-        string decimateNote = "";
-        if (source.Count > PathSampler.MaxSampleContours)
+        string note;
+        if (AutoCutoff)
         {
-            source = PathSampler.Decimate(source, PathSampler.MaxSampleContours);
-            decimateNote = $"轮廓抽稀：{Polylines.Count:N0} → {source.Count:N0}（仿真代表子集）\n";
+            if (Polylines.Count > PathSampler.MaxSampleContours)
+            {
+                // 阶段①：仅在代表子集上自动搜索截止频率（昂贵的 18 次 filtfilt 迭代只跑子集）
+                var subset = PathSampler.Decimate(Polylines, PathSampler.MaxSampleContours);
+                var subsetTraj = PathSampler.Sample(subset, FeedSpeed, RapidSpeed, SampleRate);
+                double cutoff = FrequencyDecomposer.DecomposeAuto(subsetTraj, GalvoFov).CutoffHz;
+
+                // 阶段②：全量采样 + 固定截止频率单次分解（不丢任何轮廓）
+                var traj = PathSampler.Sample(Polylines, FeedSpeed, RapidSpeed, SampleRate);
+                Plan = FrequencyDecomposer.Decompose(traj, cutoff, GalvoFov);
+                note = $"截止频率在 {subset.Count:N0}/{Polylines.Count:N0} 代表子集上估得，全量分解\n";
+            }
+            else
+            {
+                var traj = PathSampler.Sample(Polylines, FeedSpeed, RapidSpeed, SampleRate);
+                Plan = FrequencyDecomposer.DecomposeAuto(traj, GalvoFov);
+                note = "";
+            }
+            CutoffHz = Math.Round(Plan.CutoffHz, 2);
         }
-
-        var traj = PathSampler.Sample(source, FeedSpeed, RapidSpeed, SampleRate);
-        Plan = AutoCutoff
-            ? FrequencyDecomposer.DecomposeAuto(traj, GalvoFov)
-            : FrequencyDecomposer.Decompose(traj, CutoffHz, GalvoFov);
-
-        if (AutoCutoff) CutoffHz = Math.Round(Plan.CutoffHz, 2);
+        else
+        {
+            // 手动截止频率：无需估参，直接全量采样 + 单次分解
+            var traj = PathSampler.Sample(Polylines, FeedSpeed, RapidSpeed, SampleRate);
+            Plan = FrequencyDecomposer.Decompose(traj, CutoffHz, GalvoFov);
+            note = "";
+        }
 
         RebuildSimulator();
 
         string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
         PlanInfo =
-            decimateNote +
-            $"采样点数：{Plan.Count}   加工时长：{traj.Duration:F1} s\n" +
+            note +
+            $"加工轮廓：{Polylines.Count:N0} 条（全量，无丢弃）\n" +
+            $"采样点数：{Plan.Count}   加工时长：{Plan.Raw.Duration:F1} s\n" +
             $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
             $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
             $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s\n" +
