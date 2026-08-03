@@ -36,6 +36,8 @@ public sealed class LinkageSimulator
     public double[] SpotY { get; }
     public double[] StageActX { get; }
     public double[] StageActY { get; }
+    public double[] GalvoActX { get; }      // 振镜实际偏摆（局部坐标）
+    public double[] GalvoActY { get; }
     public double[] StageErrX { get; }      // 平台跟随误差
     public double[] StageErrY { get; }
     public double[] SpotError { get; }      // 激光落点 vs 理想轨迹的合成误差
@@ -78,6 +80,7 @@ public sealed class LinkageSimulator
         int n = plan.Count;
         SpotX = new double[n]; SpotY = new double[n];
         StageActX = new double[n]; StageActY = new double[n];
+        GalvoActX = new double[n]; GalvoActY = new double[n];
         StageErrX = new double[n]; StageErrY = new double[n];
         SpotError = new double[n];
         Reset();
@@ -131,6 +134,7 @@ public sealed class LinkageSimulator
             // 记录
             SpotX[i] = spotX; SpotY[i] = spotY;
             StageActX[i] = actX; StageActY[i] = actY;
+            GalvoActX[i] = gX; GalvoActY[i] = gY;
             StageErrX[i] = errX; StageErrY[i] = errY;
             SpotError[i] = resid;
 

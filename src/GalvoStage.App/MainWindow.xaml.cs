@@ -10,6 +10,7 @@ using GalvoStage.App.Rendering;
 using GalvoStage.App.ViewModels;
 using Microsoft.Win32;
 using SkiaSharp.Views.Desktop;
+using SkiaSharp.Views.WPF;
 
 namespace GalvoStage.App;
 
@@ -24,21 +25,27 @@ public sealed class InverseBoolConverter : IValueConverter
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _vm = new();
-    private readonly ViewTransform _vt = new();
+    private readonly ViewTransform _vt = new();          // 平台视图（世界坐标）
+    private readonly ViewTransform _galvoVt = new();     // 振镜视图（局部坐标 ±FOV）
     private readonly Stopwatch _clock = new();
     private double _lastTime;
     private bool _fitPending = true;
     private bool _originInitialized;           // 首帧将坐标原点置于画布中心
-    private (double X, double Y)? _mouseWorld; // 鼠标世界坐标
+    private bool _galvoFitPending = true;
+    private bool _galvoOriginInitialized;
+    private (double X, double Y)? _mouseWorld; // 平台视图鼠标世界坐标
+    private (double X, double Y)? _galvoMouseWorld; // 振镜视图鼠标坐标
 
     private bool _panning;
     private Point _panStart;
+    private bool _galvoPanning;
+    private Point _galvoPanStart;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContext = _vm;
-        _vm.SceneChanged += () => { InvalidateCanvases(); };
+        _vm.SceneChanged += () => { _galvoFitPending = true; InvalidateCanvases(); };
         _vm.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(MainViewModel.IsRunning))
@@ -66,11 +73,12 @@ public partial class MainWindow : Window
 
     private void InvalidateCanvases()
     {
-        MainCanvas.InvalidateVisual();
+        StageCanvas.InvalidateVisual();
+        GalvoCanvas.InvalidateVisual();
         ChartCanvas.InvalidateVisual();
     }
 
-    private void OnPaintMain(object? sender, SKPaintSurfaceEventArgs e)
+    private void OnPaintStage(object? sender, SKPaintSurfaceEventArgs e)
     {
         float w = e.Info.Width, h = e.Info.Height;
         // 初始化：空画布也显示 XY 轴，原点居中
@@ -85,6 +93,29 @@ public partial class MainWindow : Window
             _fitPending = false;
         }
         SceneRenderer.DrawScene(e.Surface.Canvas, _vm, _vt, w, h, _mouseWorld);
+    }
+
+    private void OnPaintGalvo(object? sender, SKPaintSurfaceEventArgs e)
+    {
+        float w = e.Info.Width, h = e.Info.Height;
+        if (!_galvoOriginInitialized && w > 0 && h > 0)
+        {
+            _galvoVt.CenterOrigin(w, h);
+            _galvoOriginInitialized = true;
+        }
+        if (_galvoFitPending && w > 0 && h > 0)
+        {
+            FitGalvoView(w, h);
+            _galvoFitPending = false;
+        }
+        SceneRenderer.DrawGalvoView(e.Surface.Canvas, _vm, _galvoVt, w, h, _galvoMouseWorld);
+    }
+
+    /// <summary>振镜视图自适应：以振镜中心为原点，铺满 ±FOV 视场</summary>
+    private void FitGalvoView(float w, float h)
+    {
+        double m = Math.Max(_vm.GalvoFov * 1.3, 1);
+        _galvoVt.Fit(-m, -m, m, m, w, h);
     }
 
     private void OnPaintChart(object? sender, SKPaintSurfaceEventArgs e)
@@ -275,56 +306,92 @@ public partial class MainWindow : Window
 
     // ================= 视图交互 =================
 
-    private void OnCanvasWheel(object sender, MouseWheelEventArgs e)
+    private static void ZoomCanvas(SKElement c, ViewTransform vt, MouseWheelEventArgs e)
     {
-        var pos = e.GetPosition(MainCanvas);
-        var dpi = VisualTreeHelper.GetDpi(MainCanvas);
-        _vt.ZoomAt((float)(pos.X * dpi.DpiScaleX), (float)(pos.Y * dpi.DpiScaleY),
+        var pos = e.GetPosition(c);
+        var dpi = VisualTreeHelper.GetDpi(c);
+        vt.ZoomAt((float)(pos.X * dpi.DpiScaleX), (float)(pos.Y * dpi.DpiScaleY),
             e.Delta > 0 ? 1.15 : 1 / 1.15);
-        MainCanvas.InvalidateVisual();
+        c.InvalidateVisual();
     }
 
-    private void OnCanvasMouseDown(object sender, MouseButtonEventArgs e)
+    // ---- 平台视图（世界坐标）----
+    private void OnStageWheel(object sender, MouseWheelEventArgs e) => ZoomCanvas(StageCanvas, _vt, e);
+
+    private void OnStageMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton == MouseButton.Left && e.ClickCount == 2)
         {
-            var dpi = VisualTreeHelper.GetDpi(MainCanvas);
-            FitView((float)(MainCanvas.ActualWidth * dpi.DpiScaleX),
-                    (float)(MainCanvas.ActualHeight * dpi.DpiScaleY));
-            MainCanvas.InvalidateVisual();
+            var dpi = VisualTreeHelper.GetDpi(StageCanvas);
+            FitView((float)(StageCanvas.ActualWidth * dpi.DpiScaleX),
+                    (float)(StageCanvas.ActualHeight * dpi.DpiScaleY));
+            StageCanvas.InvalidateVisual();
             return;
         }
         if (e.ChangedButton is MouseButton.Left or MouseButton.Middle)
         {
             _panning = true;
-            _panStart = e.GetPosition(MainCanvas);
-            MainCanvas.CaptureMouse();
+            _panStart = e.GetPosition(StageCanvas);
+            StageCanvas.CaptureMouse();
         }
     }
 
-    private void OnCanvasMouseMove(object sender, MouseEventArgs e)
+    private void OnStageMouseMove(object sender, MouseEventArgs e)
     {
-        var pos = e.GetPosition(MainCanvas);
-        var dpi = VisualTreeHelper.GetDpi(MainCanvas);
-        
-        if (!_panning) return;
-        _vt.Pan((pos.X - _panStart.X) * dpi.DpiScaleX, (pos.Y - _panStart.Y) * dpi.DpiScaleY);
-        _panStart = pos;
-        MainCanvas.InvalidateVisual();
+        var pos = e.GetPosition(StageCanvas);
+        var dpi = VisualTreeHelper.GetDpi(StageCanvas);
+        if (_panning)
+        {
+            _vt.Pan((pos.X - _panStart.X) * dpi.DpiScaleX, (pos.Y - _panStart.Y) * dpi.DpiScaleY);
+            _panStart = pos;
+        }
+        _mouseWorld = _vt.ToWorld((float)(pos.X * dpi.DpiScaleX), (float)(pos.Y * dpi.DpiScaleY));
+        StageCanvas.InvalidateVisual();
     }
 
-    private void OnCanvasMouseMoveUpdatePos(object sender, MouseEventArgs e)
-    {
-        var pos = e.GetPosition(MainCanvas);
-        var dpi = VisualTreeHelper.GetDpi(MainCanvas);
-        var screenPx = new SkiaSharp.SKPoint((float)(pos.X * dpi.DpiScaleX), (float)(pos.Y * dpi.DpiScaleY));
-        _mouseWorld = _vt.ToWorld(screenPx.X, screenPx.Y);
-        MainCanvas.InvalidateVisual();
-    }
-
-    private void OnCanvasMouseUp(object sender, MouseButtonEventArgs e)
+    private void OnStageMouseUp(object sender, MouseButtonEventArgs e)
     {
         _panning = false;
-        MainCanvas.ReleaseMouseCapture();
+        StageCanvas.ReleaseMouseCapture();
+    }
+
+    // ---- 振镜视图（局部坐标 ±FOV）----
+    private void OnGalvoWheel(object sender, MouseWheelEventArgs e) => ZoomCanvas(GalvoCanvas, _galvoVt, e);
+
+    private void OnGalvoMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Left && e.ClickCount == 2)
+        {
+            var dpi = VisualTreeHelper.GetDpi(GalvoCanvas);
+            FitGalvoView((float)(GalvoCanvas.ActualWidth * dpi.DpiScaleX),
+                         (float)(GalvoCanvas.ActualHeight * dpi.DpiScaleY));
+            GalvoCanvas.InvalidateVisual();
+            return;
+        }
+        if (e.ChangedButton is MouseButton.Left or MouseButton.Middle)
+        {
+            _galvoPanning = true;
+            _galvoPanStart = e.GetPosition(GalvoCanvas);
+            GalvoCanvas.CaptureMouse();
+        }
+    }
+
+    private void OnGalvoMouseMove(object sender, MouseEventArgs e)
+    {
+        var pos = e.GetPosition(GalvoCanvas);
+        var dpi = VisualTreeHelper.GetDpi(GalvoCanvas);
+        if (_galvoPanning)
+        {
+            _galvoVt.Pan((pos.X - _galvoPanStart.X) * dpi.DpiScaleX, (pos.Y - _galvoPanStart.Y) * dpi.DpiScaleY);
+            _galvoPanStart = pos;
+        }
+        _galvoMouseWorld = _galvoVt.ToWorld((float)(pos.X * dpi.DpiScaleX), (float)(pos.Y * dpi.DpiScaleY));
+        GalvoCanvas.InvalidateVisual();
+    }
+
+    private void OnGalvoMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        _galvoPanning = false;
+        GalvoCanvas.ReleaseMouseCapture();
     }
 }

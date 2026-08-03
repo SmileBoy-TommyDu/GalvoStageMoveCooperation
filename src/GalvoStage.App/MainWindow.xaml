@@ -274,20 +274,45 @@
                 </ScrollViewer>
             </Border>
 
-            <!-- ================= 右侧画布区 ================= -->
+            <!-- ================= 右侧画布区（平台 / 振镜 双视图 + 误差图表） ================= -->
             <Grid Grid.Column="1">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="180"/>
                 </Grid.RowDefinitions>
 
-                <!-- 带标尺的画布容器 -->
+                <!-- 双轨迹视图：左=平台(世界坐标)  右=振镜(局部坐标 ±FOV) -->
                 <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
 
-                    <!-- 主画布（带坐标高亮） -->
-                    <skia:SKElement x:Name="MainCanvas" PaintSurface="OnPaintMain"
-                                    MouseWheel="OnCanvasWheel" MouseDown="OnCanvasMouseDown"
-                                    MouseMove="OnCanvasMouseMoveUpdatePos" MouseUp="OnCanvasMouseUp"/>
+                    <!-- 平台运动轨迹（世界坐标） -->
+                    <Grid Grid.Column="0">
+                        <skia:SKElement x:Name="StageCanvas" PaintSurface="OnPaintStage"
+                                        MouseWheel="OnStageWheel" MouseDown="OnStageMouseDown"
+                                        MouseMove="OnStageMouseMove" MouseUp="OnStageMouseUp"/>
+                        <Border Background="#CC141821" CornerRadius="5" Padding="9,4"
+                                HorizontalAlignment="Left" VerticalAlignment="Top" Margin="50,48,0,0">
+                            <TextBlock Text="平台运动轨迹 · 世界坐标 (mm)" FontSize="12" FontWeight="SemiBold" Foreground="#7FB0FF"/>
+                        </Border>
+                    </Grid>
+
+                    <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                                  Background="{StaticResource CardBorder}" ShowsPreview="True"/>
+
+                    <!-- 振镜运动轨迹（振镜局部坐标 ±FOV） -->
+                    <Grid Grid.Column="2">
+                        <skia:SKElement x:Name="GalvoCanvas" PaintSurface="OnPaintGalvo"
+                                        MouseWheel="OnGalvoWheel" MouseDown="OnGalvoMouseDown"
+                                        MouseMove="OnGalvoMouseMove" MouseUp="OnGalvoMouseUp"/>
+                        <Border Background="#CC141821" CornerRadius="5" Padding="9,4"
+                                HorizontalAlignment="Left" VerticalAlignment="Top" Margin="50,48,0,0">
+                            <TextBlock Text="振镜运动轨迹 · 局部坐标 ±FOV (mm)" FontSize="12" FontWeight="SemiBold" Foreground="#FFB35C"/>
+                        </Border>
+                    </Grid>
                 </Grid>
 
                 <Border Grid.Row="1" BorderBrush="{StaticResource CardBorder}" BorderThickness="0,1,0,0">

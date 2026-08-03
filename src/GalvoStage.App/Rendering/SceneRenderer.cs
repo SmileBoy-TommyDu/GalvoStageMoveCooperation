@@ -58,6 +58,7 @@ public static class SceneRenderer
     private static readonly SKColor SpotColor = new(0xFF, 0x3B, 0x30);
     private static readonly SKColor FovColor = new(0x2E, 0xCC, 0x71);
     private static readonly SKColor GalvoLineColor = new(0xFF, 0xD6, 0x0A);
+    private static readonly SKColor GalvoActColor = new(0xFF, 0x8C, 0x2E);      // 橙色 - 振镜实际偏摆轨迹
     private static readonly SKColor DrillPointColor = new(0xFF, 0x5C, 0xB8);   // 紫红点 - 钻孔位置
     private static readonly SKColor DrillTrajColor = new(0xF9, 0xBE, 0x5F);     // 橙色线 - 钻孔顺序
     private static readonly SKColor RulerBg = new(0x1A, 0x1A, 0x24);
@@ -135,6 +136,65 @@ public static class SceneRenderer
 
         DrawMouseCursorCrosshair(canvas, vt, width, height, mouseWorld);
         DrawLegend(canvas, width);
+    }
+
+    /// <summary>
+    /// 振镜运动轨迹独立视图（振镜局部坐标，原点=振镜中心，量程 ±FOV）。
+    /// 绘制：FOV 边界框 + 振镜指令高频分量路径(黄) + 仿真中振镜实际偏摆轨迹(橙) + 当前偏摆矢量与落点。
+    /// 与平台视图共用等时采样数据，随实时仿真逐帧刷新。
+    /// </summary>
+    public static void DrawGalvoView(SKCanvas canvas, MainViewModel vm, ViewTransform vt, float width, float height, (double X, double Y)? mouseWorld = null)
+    {
+        canvas.Clear(BgColor);
+        DrawGrid(canvas, vt, width, height);
+        DrawRulers(canvas, vt, width, height);
+
+        var plan = vm.Plan;
+        var sim = vm.Sim;
+
+        // 振镜视场边界框（±FOV 方框，绿色虚线）
+        double fov = vm.GalvoFov;
+        var tl = vt.ToScreen(-fov, fov);
+        var br = vt.ToScreen(fov, -fov);
+        using (var fovPaint = new SKPaint
+        {
+            IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1.4f,
+            Color = FovColor.WithAlpha(200), PathEffect = SKPathEffect.CreateDash(new float[] { 6, 4 }, 0)
+        })
+            canvas.DrawRect(tl.X, tl.Y, br.X - tl.X, br.Y - tl.Y, fovPaint);
+
+        using var paint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1f };
+
+        // 振镜指令（高频分量，黄色淡）
+        if (plan != null)
+        {
+            paint.Color = GalvoLineColor.WithAlpha(110);
+            paint.StrokeWidth = 1f;
+            DrawSampled(canvas, paint, vt, plan.GalvoX, plan.GalvoY, 0, plan.Count);
+        }
+
+        // 振镜实际偏摆轨迹（橙色）+ 当前偏摆矢量/落点
+        if (sim != null && sim.Index > 1)
+        {
+            paint.Color = GalvoActColor.WithAlpha(160);
+            paint.StrokeWidth = 1.4f;
+            DrawSampled(canvas, paint, vt, sim.GalvoActX, sim.GalvoActY, 0, sim.Index);
+
+            var center = vt.ToScreen(0, 0);
+            var cur = vt.ToScreen(sim.CurGalvoX, sim.CurGalvoY);
+            using var beam = new SKPaint { IsAntialias = true, Color = GalvoLineColor.WithAlpha(170), StrokeWidth = 1.2f };
+            canvas.DrawLine(center, cur, beam);
+            using var dot = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
+            if (sim.CurLaserOn)
+            {
+                dot.Color = SpotColor.WithAlpha(60);
+                canvas.DrawCircle(cur, 9, dot);
+            }
+            dot.Color = sim.CurLaserOn ? SpotColor : GalvoActColor;
+            canvas.DrawCircle(cur, 4, dot);
+        }
+
+        DrawMouseCursorCrosshair(canvas, vt, width, height, mouseWorld);
     }
 
     // ------------------ XY 标尺与鼠标位置高亮 --------------------
