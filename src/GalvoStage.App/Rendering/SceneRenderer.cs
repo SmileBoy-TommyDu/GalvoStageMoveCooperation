@@ -486,8 +486,9 @@ public static class SceneRenderer
     }
 
     /// <summary>
-    /// PCB 钻孔点渲染：视口裁剪 + 屏幕网格去重，600 万孔也能流畅平移缩放。
-    /// 放大到孔间距 > 6px 时画小圆圈，否则退化为像素方点点云。
+    /// PCB 钻孔渲染：按每个孔的真实孔径（Diameter）画圆轮廓，还原原始图形。
+    /// 视口裁剪（含孔半径，大孔中心在视口外仍绘制）+ 屏幕尺寸分级 LOD：
+    /// 屏幕半径 ≥ 1.5px 的孔画真实孔径圆；亚像素小孔退化为点云（屏幕网格去重），600 万孔也能流畅平移缩放。
     /// </summary>
     private static void DrawDrillingPattern(SKCanvas canvas, SKPaint paint, ViewTransform vt,
         Core.Geometry.Drilling.DrillingPattern pattern, float width, float height)
@@ -501,16 +502,7 @@ public static class SceneRenderer
         double vx0 = wl, vx1 = wr, vy0 = wb, vy1 = wt;
         double scale = vt.Scale, offX = vt.OffsetX, offY = vt.OffsetY;
 
-        // 估算平均孔间距（像素）决定绘制级别
-        bool drawCircles = false;
-        if (pattern.Bounds is { } b && n > 0)
-        {
-            double area = Math.Max((b.MaxX - b.MinX) * (b.MaxY - b.MinY), 1e-9);
-            double avgSpacingPx = Math.Sqrt(area / n) * scale;
-            drawCircles = avgSpacingPx > 6;
-        }
-
-        // 屏幕网格去重（复用 LOD 缓冲）
+        // 屏幕网格去重（复用 LOD 缓冲）——仅用于亚像素小孔的点云
         int gw = (int)(width / DedupCellPx) + 2;
         int gh = (int)(height / DedupCellPx) + 2;
         int cells = gw * gh;
@@ -518,39 +510,51 @@ public static class SceneRenderer
         else Array.Clear(_dedupCells, 0, cells);
         var dedup = _dedupCells;
 
+        const float MinCircleRadiusPx = 1.5f;   // 小于此屏幕半径的孔退化为点
+        var circles = new List<(SKPoint c, float r)>(1024);
         var pts = new List<SKPoint>(Math.Min(n, 200_000));
+        bool circleCapped = false;
         for (int i = 0; i < n; i++)
         {
             var h = holes[i];
-            if (h.X < vx0 || h.X > vx1 || h.Y < vy0 || h.Y > vy1) continue;
+            double rW = h.Diameter * 0.5;                 // 世界半径 (mm)
+            // 视口裁剪：计入孔半径，使中心在视口外但圆弧可见的大孔仍被绘制
+            if (h.X + rW < vx0 || h.X - rW > vx1 || h.Y + rW < vy0 || h.Y - rW > vy1) continue;
+
             float sx = (float)(offX + h.X * scale);
             float sy = (float)(offY - h.Y * scale);
-            if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
-            if (!drawCircles)
+            float rPx = (float)(rW * scale);              // 屏幕半径 (px)
+            if (!circleCapped && rPx >= MinCircleRadiusPx)
             {
+                circles.Add((new SKPoint(sx, sy), rPx));
+                if (circles.Count > 60_000) circleCapped = true;   // 极端情况下停止收集，防卡顿
+            }
+            else
+            {
+                if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
                 int cell = (int)(sy / DedupCellPx) * gw + (int)(sx / DedupCellPx);
                 if (dedup[cell] != 0) continue;
                 dedup[cell] = 1;
+                pts.Add(new SKPoint(sx, sy));
             }
-            pts.Add(new SKPoint(sx, sy));
-            if (drawCircles && pts.Count > 60_000) drawCircles = false;   // 视口内过多则退化
         }
 
         var saved = (paint.Color, paint.Style, paint.StrokeWidth, paint.IsAntialias);
-        if (drawCircles)
+        // 亚像素小孔：点云
+        if (pts.Count > 0)
+        {
+            paint.Color = DrillPointColor;
+            FlushPoints(canvas, paint, pts.ToArray(), pts.Count);
+        }
+        // 可见孔：按真实孔径画圆轮廓
+        if (circles.Count > 0)
         {
             paint.Color = DrillPointColor;
             paint.Style = SKPaintStyle.Stroke;
             paint.StrokeWidth = 1.2f;
             paint.IsAntialias = true;
-            float r = Math.Clamp((float)(scale * 0.15), 2f, 5f);
-            foreach (var p in pts)
-                canvas.DrawCircle(p, r, paint);
-        }
-        else if (pts.Count > 0)
-        {
-            paint.Color = DrillPointColor;
-            FlushPoints(canvas, paint, pts.ToArray(), pts.Count);
+            foreach (var (c, r) in circles)
+                canvas.DrawCircle(c, r, paint);
         }
         (paint.Color, paint.Style, paint.StrokeWidth, paint.IsAntialias) = saved;
     }

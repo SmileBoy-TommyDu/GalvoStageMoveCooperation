@@ -307,8 +307,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 钻孔轨迹 → 等时采样 → 频率分解 → 仿真准备。
-    /// 孔间按快移速度插补（激光关），孔位停留 DwellTimeMs（激光开=钻孔）；
+    /// 钻孔轨迹 → 等时采样 → 频率分解 → 仿真准备（激光钻孔）。
+    /// 孔间按快移速度插补（激光关）；到达孔位后按孔径做<b>环切 trepanning</b>：
+    /// 以孔半径沿圆周走 laser on，圈数由停留时间/单圈时间决定——由此<b>体现不同孔径的加工轨迹</b>。
+    /// 孔径未知或过小（半径 &lt; 一个进给步距）时回退为原地点钻停留。
     /// 孔数过多时等间距抽样代表子集，避免采样点爆炸。
     /// </summary>
     public void DecomposeDrilling()
@@ -319,51 +321,81 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        // 仿真孔数上限：2000 孔 × 50ms 停留 @1kHz ≈ 10 万采样点，与现有管线规模一致
+        // 仿真孔数上限：2000 孔 × 50ms 停留 @1kHz ≈ 10 万采样点，与现有管线规模一致。
+        // 注意：抽样只用于“仿真预览”，全部 moves 已在 DrillingTrajectory 中，G 代码导出/加工不受影响。
         const int MaxSimHoles = 2_000;
         var moves = DrillingTrajectory.Moves;
         string note = "";
         IReadOnlyList<DrillPlanner.HoleMove> simMoves;
         if (moves.Count > MaxSimHoles)
         {
-            var picked = new List<DrillPlanner.HoleMove>(MaxSimHoles);
-            double stride = moves.Count / (double)MaxSimHoles;
-            for (int i = 0; i < MaxSimHoles; i++)
-                picked.Add(moves[(int)(i * stride)]);
-            simMoves = picked;
-            note = $"孔位抽样：{moves.Count:N0} → {picked.Count:N0}（仿真代表子集）\n";
+            simMoves = SampleUniform(moves, MaxSimHoles);
+            note = $"孔位抽样：{moves.Count:N0} → {simMoves.Count:N0}（仅仿真预览；全部 {moves.Count:N0} 孔仍将导出/加工）\n";
         }
         else simMoves = moves;
 
-        // 等时采样：孔间快移插补（激光关）+ 孔位停留（激光开）
+        // 等时采样：孔间快移插补（激光关）+ 按孔径环切（激光开=钻孔）
         double dt = 1.0 / SampleRate;
         double rapidStep = RapidSpeed * dt;
+        double feedStep = FeedSpeed * dt;
         var xs = new List<double>(1 << 17);
         var ys = new List<double>(1 << 17);
         var laser = new List<bool>(1 << 17);
+        int trepanCount = 0, pointCount = 0;
 
         Vec2 cur = new(simMoves[0].Position.X, simMoves[0].Position.Y);
         foreach (var m in simMoves)
         {
-            var target = m.Position;
-            double len = cur.DistanceTo(target);
+            double cx = m.Position.X, cy = m.Position.Y;
+            double r = m.Diameter * 0.5;
+            bool trepan = m.Diameter > 0 && r >= feedStep;   // 半径够大才能环切成圆
+
+            // 进刀点：环切起于圆周 (cx+r, cy)，点钻则为圆心
+            Vec2 entry = trepan ? new Vec2(cx + r, cy) : new Vec2(cx, cy);
+
+            // 空移到进刀点（激光关）
+            double len = cur.DistanceTo(entry);
             if (len > 1e-12)
             {
                 int steps = Math.Max(1, (int)Math.Ceiling(len / rapidStep));
                 for (int s = 1; s <= steps; s++)
                 {
                     double t = (double)s / steps;
-                    xs.Add(cur.X + (target.X - cur.X) * t);
-                    ys.Add(cur.Y + (target.Y - cur.Y) * t);
+                    xs.Add(cur.X + (entry.X - cur.X) * t);
+                    ys.Add(cur.Y + (entry.Y - cur.Y) * t);
                     laser.Add(false);
                 }
             }
-            int dwellN = Math.Max(1, (int)(m.DwellTimeMs / 1000.0 * SampleRate));
-            for (int s = 0; s < dwellN; s++)
+
+            if (trepan)
             {
-                xs.Add(target.X); ys.Add(target.Y); laser.Add(true);
+                // 环切：沿孔径圆周走 laser on；圈数 = 停留时间 / 单圈时间（体现孔径 + 加工量）
+                double circumference = 2 * Math.PI * r;
+                int ptsPerLoop = Math.Max(8, (int)Math.Ceiling(circumference / feedStep));
+                double loopTimeMs = circumference / FeedSpeed * 1000.0;
+                int loops = Math.Max(1, (int)Math.Round(m.DwellTimeMs / loopTimeMs));
+                int totalPts = ptsPerLoop * loops;
+                for (int k = 1; k <= totalPts; k++)
+                {
+                    double ang = 2 * Math.PI * (k / (double)ptsPerLoop);
+                    xs.Add(cx + r * Math.Cos(ang));
+                    ys.Add(cy + r * Math.Sin(ang));
+                    laser.Add(true);
+                }
+                cur = entry;   // 环切结束回到进刀点
+                trepanCount++;
             }
-            cur = target;
+            else
+            {
+                // 点钻（孔径未知或过小）：原地停留
+                int dwellN = Math.Max(1, (int)(m.DwellTimeMs / 1000.0 * SampleRate));
+                for (int s = 0; s < dwellN; s++)
+                {
+                    xs.Add(cx); ys.Add(cy); laser.Add(true);
+                }
+                cur = new Vec2(cx, cy);
+                pointCount++;
+            }
         }
 
         var traj = new SampledTrajectory
@@ -382,9 +414,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RebuildSimulator();
 
         string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
+        // 逐孔动力学预检（对全量孔，非仅预览子集）
+        string precheck = PrecheckDrillDynamics(moves);
+        string precheckLine = precheck.Length > 0 ? precheck : "逐孔预检：✅ 全部孔径在当前进给下可行\n";
         PlanInfo =
             note +
-            $"钻孔仿真：{simMoves.Count:N0} 孔   采样点数：{Plan.Count:N0}   时长：{traj.Duration:F1} s\n" +
+            precheckLine +
+            $"钻孔仿真预览：{simMoves.Count:N0} 孔 / 全量加工 {moves.Count:N0} 孔   采样点数：{Plan.Count:N0}   时长：{traj.Duration:F1} s\n" +
+            $"加工方式（预览子集）：环切 {trepanCount:N0} 孔 / 点钻 {pointCount:N0} 孔\n" +
             $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
             $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
             $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s\n" +
@@ -404,6 +441,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return $"孔径：{diameterCounts.Count} 种  {string.Join("  ", top)}{more}";
     }
 
+    /// <summary>最近一次逐孔动力学预检的结构化结果（含环切频率/向心加速度统计），供 UI 与其它消费者读取。</summary>
+    public DrillDynamicsReport? LastDrillDynamics { get; private set; }
+
+    /// <summary>
+    /// 逐孔动力学预检（对齐 docs/06 §7.4）：委托 <see cref="DrillDynamicsPrecheck"/> 按环切频率
+    /// f=v/(2πr) 与向心加速度 a=v²/r 估算，找出在当前进给下平台跟随能力不足、无法完美加工的孔，
+    /// 缓存结构化结果到 <see cref="LastDrillDynamics"/> 并格式化为告警文本。全部可行返回空串。
+    /// </summary>
+    private string PrecheckDrillDynamics(IReadOnlyList<DrillPlanner.HoleMove> moves)
+    {
+        var report = DrillDynamicsPrecheck.Evaluate(moves, FeedSpeed, StageBandwidth, SampleRate, GalvoFov);
+        LastDrillDynamics = report;
+        if (report.AllFeasible) return "";
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"⚠️ 逐孔预检：{report.OffenderKindCount} 种孔径在进给 {FeedSpeed:F0} mm/s 下超平台跟随能力（带宽 {StageBandwidth:F1}Hz）\n");
+        foreach (var o in report.Offenders)
+            sb.Append($"   Ø{o.Diameter:F3}×{o.Count:N0}：f={o.FrequencyHz:F1}Hz(>{report.FrequencyCapHz:F1}) a={o.AccelMmPerS2:F0}mm/s² → 建议进给≤{o.SuggestedFeed:F0} mm/s\n");
+        return sb.ToString();
+    }
+
     /// <summary>导出已规划的钻孔轨迹为 G 代码（按孔径分组换刀）</summary>
     public bool ExportGCode(string path)
     {
@@ -415,7 +473,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         try
         {
             int n = GCodeExporter.Export(DrillingTrajectory, path);
-            DrillingInfo = $"✅ G 代码已导出：{n:N0} 孔\n{Path.GetFileName(path)}";
+            DrillingInfo = $"✅ G 代码已导出：{n:N0} 孔（全量）\n{Path.GetFileName(path)}";
             return true;
         }
         catch (Exception ex)
@@ -440,28 +498,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         DrillingInfo = $"正在规划路径... ({holeCount:N0} 个孔)";
         await Task.Run(() =>
         {
-            // 对于超大文件，可以使用采样策略
-            const int MaxSampleHoles = 100_000;
-            List<DrillingPattern.Hole> sampleHoles;
-                    
-            if (holeCount > MaxSampleHoles)
-            {
-                Console.WriteLine($"📊 {holeCount:N0} 孔过大，进行降采样...");
-                sampleHoles = SampleHoles(pattern, MaxSampleHoles);
-                DrillingInfo += $"  → 采样至{sampleHoles.Count:N0}个孔\n";
-            }
-            else
-            {
-                sampleHoles = new List<DrillingPattern.Hole>(pattern.Holes);
-            }
-            
-            var samplePattern = new DrillingPattern();
-            foreach (var h in sampleHoles)
-                samplePattern.Holes.Add(h);
-            samplePattern.RecomputeBounds();
-            
-            DrillingTrajectory = DrillPlanner.Plan(samplePattern, dwellTimeMs);
-            DrillingInfo = $"✅ 路径规划完成！\n孔数：{DrillingTrajectory!.HoleCount:N0}\n" +
+            // 全量规划：所有孔都进入 DrillingTrajectory（G 代码导出/加工的数据源），绝不丢弃。
+            // DrillPlanner.Plan 对 >5000 孔用 Z-order（莫顿码）排序，复杂度 O(n log n)，百万级孔亦可承受；
+            // 抽样只发生在仿真预览阶段（DecomposeDrilling），不影响加工指令——对齐激光链路的两阶段策略。
+            DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs);
+            DrillingInfo = $"✅ 路径规划完成！\n孔数：{DrillingTrajectory!.HoleCount:N0}（全量，无丢弃）\n" +
                           $"预计加工时长：{DrillingTrajectory.TotalDurationMs / 1000:F1} s\n" +
                           "→ 点击“执行路径分解”准备仿真";
         });
@@ -469,18 +510,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SceneChanged?.Invoke();
     }
     
-    private static List<DrillingPattern.Hole> SampleHoles(DrillingPattern pattern, int targetCount)
+    /// <summary>
+    /// 均匀步长抽样：从有序列表中等间距挑选至多 targetCount 个元素。
+    /// <b>仅用于仿真预览子集</b>，绝不影响 DrillingTrajectory / G 代码导出的加工数据（全量孔已在规划阶段落地）。
+    /// </summary>
+    private static List<T> SampleUniform<T>(IReadOnlyList<T> items, int targetCount)
     {
-        var result = new List<DrillingPattern.Hole>();
-        double step = pattern.Holes.Count / (double)targetCount;
-        
-        for (int i = 0; i < pattern.Holes.Count; i++)
-        {
-            if (result.Count >= targetCount) break;
-            if (i % (int)step == 0 || i == pattern.Holes.Count - 1)
-                result.Add(pattern.Holes[i]);
-        }
-        
+        if (items.Count <= targetCount)
+            return new List<T>(items);
+
+        var result = new List<T>(targetCount);
+        double stride = items.Count / (double)targetCount;
+        for (int i = 0; i < targetCount; i++)
+            result.Add(items[(int)(i * stride)]);
         return result;
     }
     
