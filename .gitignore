@@ -17,3 +17,5 @@
 /tools/ParseBench/obj
 /tools/GalvoFirstBench/bin/Debug/net6.0
 /tools/GalvoFirstBench/obj
+/tools/MixedBench/bin/Debug/net6.0
+/tools/MixedBench/obj
