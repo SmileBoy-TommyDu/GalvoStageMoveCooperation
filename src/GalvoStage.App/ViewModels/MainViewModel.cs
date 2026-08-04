@@ -503,10 +503,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await Task.Run(() =>
         {
             // 全量规划：所有孔都进入 DrillingTrajectory（G 代码导出/加工的数据源），绝不丢弃。
-            // DrillPlanner.Plan 对 >5000 孔用 Z-order（莫顿码）排序，复杂度 O(n log n)，百万级孔亦可承受；
+            // 振镜优先策略（galvoFirst=true）：以 2·FOV 为网格尺寸将孔聚类到簇，簇内全走振镜，
+            // 仅簇间才动平台。百万孔 → 几千个簇 → 平台动几千次（而非百万次），大幅节约加工时间。
             // 抽样只发生在仿真预览阶段（DecomposeDrilling），不影响加工指令——对齐激光链路的两阶段策略。
-            DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs);
-            DrillingInfo = $"✅ 路径规划完成！\n孔数：{DrillingTrajectory!.HoleCount:N0}（全量，无丢弃）\n" +
+            DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs, GalvoFov, galvoFirst: true);
+            DrillingInfo = $"✅ 路径规划完成！（振镜优先）\n孔数：{DrillingTrajectory!.HoleCount:N0}（全量，无丢弃）\n" +
                           $"预计加工时长：{DrillingTrajectory.TotalDurationMs / 1000:F1} s\n" +
                           "→ 点击“执行路径分解”准备仿真";
         });
@@ -536,7 +537,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (DrillingPattern == null || DrillingPattern.Holes.Count == 0) return;
         
         var pattern = DrillingPattern;
-        DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs);
+        // 振镜优先策略：簇内全走振镜，仅簇间动平台
+        DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs, GalvoFov, galvoFirst: true);
         PlanInfo = $"孔数：{DrillingTrajectory.HoleCount:N0}\n{DrillingTrajectory}";
         SceneChanged?.Invoke();
     }

@@ -34,17 +34,22 @@ public static class DrillPlanner
     }
 
     /// <summary>生成优化后的钻孔路径</summary>
+    /// <param name="pattern">钻孔点集</param>
+    /// <param name="dwellTimeMs">单孔停留时间 (ms)</param>
+    /// <param name="galvoFov">振镜半视场 (mm)，用于振镜优先聚类的网格尺寸；&lt;=0 时退化为纯路径最短</param>
+    /// <param name="galvoFirst">振镜优先策略：按振镜视场网格聚类，簇内全走振镜，仅簇间才动平台——大幅减少平台跳跃次数</param>
     public static DrillingTrajectory Plan(Geometry.Drilling.DrillingPattern pattern,
-        double dwellTimeMs = 50.0)
+        double dwellTimeMs = 50.0, double galvoFov = 5.0, bool galvoFirst = false)
     {
         if (pattern.Holes.Count == 0)
             return new DrillingTrajectory();
-        
-        const int MaxPointsPerZone = 5_000;
-        var ordered = pattern.Holes.Count > MaxPointsPerZone 
-            ? OrderByZonal(pattern.Holes, MaxPointsPerZone)
-            : OrderByNearestGrid(pattern.Holes);
-        
+
+        var ordered = galvoFirst
+            ? PlanGalvoFirst(pattern.Holes, galvoFov)
+            : pattern.Holes.Count > MaxPointsPerZone
+                ? OrderByZonal(pattern.Holes, MaxPointsPerZone)
+                : OrderByNearestGrid(pattern.Holes);
+
         var trajectory = new DrillingTrajectory();
         for (int i = 0; i < ordered.Count; i++)
         {
@@ -59,8 +64,156 @@ public static class DrillPlanner
                 Layer = h.Layer
             });
         }
-        
+
         return trajectory;
+    }
+
+    private const int MaxPointsPerZone = 5_000;
+
+    /// <summary>
+    /// 振镜优先路径规划（大数据场景核心优化）。
+    /// 算法：
+    ///   1. 以振镜全视场 (2·FOV) 为网格尺寸，将孔聚类到簇；
+    ///   2. 按簇质心的莫顿码（Z-order）排序簇访问顺序，保证相邻簇空间相邻；
+    ///   3. 簇内按最近邻贪心排序，让振镜在簇内走短路径。
+    /// 效果：平台仅在簇间跳跃（K 次，K=簇数），簇内全部由振镜完成。
+    /// 百万孔 / ±FOV=5mm / 600×400mm 板 → 约 4800 簇，平台动 4800 次（而非百万次）。
+    /// </summary>
+    private static List<Geometry.Drilling.DrillingPattern.Hole> PlanGalvoFirst(
+        List<Geometry.Drilling.DrillingPattern.Hole> holes, double galvoFov)
+    {
+        int n = holes.Count;
+        if (n <= 1) return new List<Geometry.Drilling.DrillingPattern.Hole>(holes);
+
+        // 1. 全局包围盒
+        double minX = double.MaxValue, minY = double.MaxValue;
+        double maxX = double.MinValue, maxY = double.MinValue;
+        foreach (var h in holes)
+        {
+            if (h.X < minX) minX = h.X;
+            if (h.Y < minY) minY = h.Y;
+            if (h.X > maxX) maxX = h.X;
+            if (h.Y > maxY) maxY = h.Y;
+        }
+
+        // 2. 网格尺寸 = 振镜全视场 (2·FOV)；FOV 过小则退化为 1mm 网格
+        double cellSize = Math.Max(galvoFov > 0 ? 2 * galvoFov : 1.0, 1e-3);
+        int dimX = Math.Max(1, (int)Math.Ceiling((maxX - minX) / cellSize));
+        int dimY = Math.Max(1, (int)Math.Ceiling((maxY - minY) / cellSize));
+        int totalCells = dimX * dimY;
+
+        // 3. 计数排序分桶：O(n) 把孔分配到 (dimX × dimY) 网格
+        var cellOf = new int[n];
+        var cellCount = new int[totalCells];
+        for (int i = 0; i < n; i++)
+        {
+            int cx = Math.Clamp((int)((holes[i].X - minX) / cellSize), 0, dimX - 1);
+            int cy = Math.Clamp((int)((holes[i].Y - minY) / cellSize), 0, dimY - 1);
+            int cell = cy * dimX + cx;
+            cellOf[i] = cell;
+            cellCount[cell]++;
+        }
+
+        // 4. 收集非空簇，建立 cellId → clusterId 映射，计算质心
+        int K = 0;
+        for (int c = 0; c < totalCells; c++)
+            if (cellCount[c] > 0) K++;
+
+        var clusterCellId = new int[K];       // 簇对应的 cell id
+        var clusterCx = new double[K];        // 簇质心 X
+        var clusterCy = new double[K];        // 簇质心 Y
+        var clusterMembers = new List<int>[K]; // 簇内孔索引
+        var cellToCluster = new int[totalCells]; // cellId → clusterId（-1 表示空）
+        Array.Fill(cellToCluster, -1);
+
+        int ki = 0;
+        for (int c = 0; c < totalCells; c++)
+        {
+            if (cellCount[c] == 0) continue;
+            cellToCluster[c] = ki;
+            clusterCellId[ki] = c;
+            clusterMembers[ki] = new List<int>(cellCount[c]);
+            ki++;
+        }
+        for (int i = 0; i < n; i++)
+        {
+            int ci = cellToCluster[cellOf[i]];
+            clusterMembers[ci].Add(i);
+            clusterCx[ci] += holes[i].X;
+            clusterCy[ci] += holes[i].Y;
+        }
+        for (int ci = 0; ci < K; ci++)
+        {
+            int cnt = clusterMembers[ci].Count;
+            clusterCx[ci] /= cnt;
+            clusterCy[ci] /= cnt;
+        }
+
+        // 5. 按簇质心莫顿码排序（O(K log K)），保证相邻簇在空间上相邻
+        var clusterOrder = OrderClustersByMorton(clusterCx, clusterCy, dimX, dimY);
+
+        // 6. 簇内按最近邻排序，拼接成最终序列
+        var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(n);
+        foreach (int ci in clusterOrder)
+        {
+            var members = clusterMembers[ci];
+            // 从簇中心出发，贪心走最近未访问孔
+            double px = clusterCx[ci], py = clusterCy[ci];
+            var usedInCluster = new bool[members.Count];
+            for (int step = 0; step < members.Count; step++)
+            {
+                int bestIdx = -1;
+                double bestD2 = double.MaxValue;
+                for (int j = 0; j < members.Count; j++)
+                {
+                    if (usedInCluster[j]) continue;
+                    int idx = members[j];
+                    double dx = holes[idx].X - px;
+                    double dy = holes[idx].Y - py;
+                    double d2 = dx * dx + dy * dy;
+                    if (d2 < bestD2) { bestD2 = d2; bestIdx = j; }
+                }
+                usedInCluster[bestIdx] = true;
+                ordered.Add(holes[members[bestIdx]]);
+                px = holes[members[bestIdx]].X;
+                py = holes[members[bestIdx]].Y;
+            }
+        }
+
+        return ordered;
+    }
+
+    /// <summary>按簇质心的莫顿码排序，返回簇索引的访问顺序</summary>
+    private static int[] OrderClustersByMorton(double[] cx, double[] cy, int dimX, int dimY)
+    {
+        int K = cx.Length;
+        int bits = 0;
+        int temp = Math.Max(dimX, dimY) - 1;
+        while (temp > 0) { bits++; temp >>= 1; }
+
+        var codes = new (ulong code, int idx)[K];
+        for (int i = 0; i < K; i++)
+        {
+            int x = Math.Clamp((int)cx[i], 0, dimX - 1);
+            int y = Math.Clamp((int)cy[i], 0, dimY - 1);
+            codes[i] = (EncodeMorton64(x, y, bits), i);
+        }
+        Array.Sort(codes, (a, b) => a.code.CompareTo(b.code));
+        var order = new int[K];
+        for (int i = 0; i < K; i++) order[i] = codes[i].idx;
+        return order;
+    }
+
+    /// <summary>64 位莫顿码（支持更大网格）</summary>
+    private static ulong EncodeMorton64(int x, int y, int bits)
+    {
+        ulong result = 0;
+        for (int i = 0; i < bits; i++)
+        {
+            result |= ((ulong)(x & (1 << i)) << (2 * i)) |
+                      ((ulong)(y & (1 << i)) << (2 * i + 1));
+        }
+        return result;
     }
 
     /// <summary>Z-order 曲线（莫顿码）分区排序（用于超大规模数据）</summary>
