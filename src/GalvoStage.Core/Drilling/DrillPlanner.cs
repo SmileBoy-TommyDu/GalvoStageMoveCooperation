@@ -102,6 +102,16 @@ public static class DrillPlanner
         int dimY = Math.Max(1, (int)Math.Ceiling((maxY - minY) / cellSize));
         int totalCells = dimX * dimY;
 
+        // 2.5 密度检查：平均孔数/单元 < 4 时，GF 会把路径打散成低效网格遍历，
+        //     回退到 Z-order 或最近邻排序（这些策略在稀疏数据上更紧凑）。
+        double density = (double)n / totalCells;
+        if (density < 4.0)
+        {
+            return n > MaxPointsPerZone
+                ? OrderByZonal(holes, MaxPointsPerZone)
+                : OrderByNearestGrid(holes);
+        }
+
         // 3. 计数排序分桶：O(n) 把孔分配到 (dimX × dimY) 网格
         var cellOf = new int[n];
         var cellCount = new int[totalCells];
