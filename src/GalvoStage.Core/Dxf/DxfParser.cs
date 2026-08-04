@@ -31,6 +31,118 @@ public static class DxfParser
         return ParseBytes(data);
     }
 
+    // ---------------- 双模式分离解析（混合特征） ----------------
+
+    /// <summary>
+    /// 双模式分离解析结果：折线特征（轮廓）与钻孔特征（小圆）分开存放。
+    /// 用于"混合特征加工"场景：一次解析、两条链路独立规划、双视图叠加显示。
+    /// </summary>
+    public sealed class MixedParseResult
+    {
+        /// <summary>折线特征（LWPOLYLINE / LINE / ARC / ELLIPSE / SPLINE / POLYLINE / INSERT 展开）</summary>
+        public List<PathPolyline> Polylines { get; init; } = new();
+        /// <summary>钻孔特征（CIRCLE，按钻孔链路处理）</summary>
+        public Geometry.Drilling.DrillingPattern DrillingHoles { get; init; } = new();
+        /// <summary>CIRCLE 总数（含被过滤的）</summary>
+        public int CircleCount { get; set; }
+    }
+
+    /// <summary>
+    /// 双模式分离解析：一次遍历同时提取折线特征与钻孔特征。
+    /// CIRCLE 实体同时写入两份数据（钻孔链路 + 折线链路），其他实体只写入折线数据。
+    /// 这样两条链路可以独立规划、独立仿真、双视图叠加显示。
+    /// </summary>
+    public static MixedParseResult ParseFileMixed(string path)
+    {
+        byte[] data = File.ReadAllBytes(path);
+        return ParseBytesMixed(data);
+    }
+
+    private static MixedParseResult ParseBytesMixed(byte[] data)
+    {
+        var result = new MixedParseResult();
+        var holes = new List<Geometry.Drilling.DrillingPattern.Hole>();
+        int circleCount = 0;
+        var blocks = new Dictionary<string, BlockDef>(StringComparer.Ordinal);
+        Encoding text = DetectTextEncoding(data);
+
+        var r = new GroupReader(data, 0, data.Length, text, 0);
+        if (!r.Read()) return result;
+        while (true)
+        {
+            if (r.Code == 0 && r.ValueEquals("SECTION"))
+            {
+                if (!r.Read()) break;
+                if (r.Code == 2 && r.ValueEquals("BLOCKS"))
+                {
+                    if (!ParseBlocksSection(r, blocks)) break;
+                    continue;
+                }
+                if (r.Code == 2 && r.ValueEquals("ENTITIES"))
+                {
+                    while (true)
+                    {
+                        if (r.Code != 0) { if (!r.Read()) break; continue; }
+                        if (r.ValueEquals("ENDSEC") || r.ValueEquals("EOF")) break;
+                        DispatchEntityMixed(r, result.Polylines, holes, blocks, ref circleCount);
+                    }
+                    break;
+                }
+                continue;
+            }
+            if (!r.Read()) break;
+        }
+
+        foreach (var h in holes) result.DrillingHoles.Holes.Add(h);
+        result.DrillingHoles.RecomputeBounds();
+        result.CircleCount = circleCount;
+        return result;
+    }
+
+    /// <summary>双模式实体分发：CIRCLE 同时写入两份数据，其他实体只写入折线</summary>
+    private static bool DispatchEntityMixed(GroupReader r, List<PathPolyline> polylines,
+        List<Geometry.Drilling.DrillingPattern.Hole> holes, Dictionary<string, BlockDef> blocks,
+        ref int circleCount)
+    {
+        if (r.ValueEquals("CIRCLE"))
+        {
+            circleCount++;
+            return AddCircleMixed(r, polylines, holes);
+        }
+        // 其他实体：只写入折线数据（复用现有分发，支持 INSERT 展开）
+        return DispatchEntity(r, polylines, blocks);
+    }
+
+    /// <summary>CIRCLE 同时写入钻孔数据与折线数据（细分为闭合多段线）</summary>
+    private static bool AddCircleMixed(GroupReader r, List<PathPolyline> polylines,
+        List<Geometry.Drilling.DrillingPattern.Hole> holes)
+    {
+        double cx = 0, cy = 0, radius = 0;
+        string layer = "0";
+        bool more;
+        while ((more = r.Read()) && r.Code != 0)
+        {
+            switch (r.Code)
+            {
+                case 8: layer = r.ValueStringInterned(); break;
+                case 10: cx = r.ValueDouble(); break;
+                case 20: cy = r.ValueDouble(); break;
+                case 40: radius = r.ValueDouble(); break;
+            }
+        }
+        if (radius > 0)
+        {
+            // 钻孔数据
+            holes.Add(new Geometry.Drilling.DrillingPattern.Hole(
+                cx, cy, radius * 2, layer, holes.Count));
+            // 折线数据（细分为闭合多段线，与 AddCircle 保持一致）
+            var pl = new PathPolyline { Closed = true, Layer = layer };
+            TessellateArc(pl.Points, new Vec2(cx, cy), radius, 0, Math.PI * 2, false);
+            polylines.Add(pl);
+        }
+        return more;
+    }
+
     public static List<PathPolyline> Parse(Stream stream)
     {
         byte[] data;

@@ -310,6 +310,103 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    // ---------------- 双模式分离加工（混合特征） ----------------
+
+    /// <summary>
+    /// 双模式分离导入：一次解析同时提取折线特征（轮廓）与钻孔特征（CIRCLE），
+    /// 两份数据并存，可分别走折线链路（频域分解）与钻孔链路（空间聚类）独立规划。
+    /// 对应 09 号文档“双模式分离加工”方案阶段①。
+    /// </summary>
+    public void ImportMixed(string path)
+    {
+        try
+        {
+            var parsed = DxfParser.ParseFileMixed(path);
+
+            Polylines = parsed.Polylines;
+            DrillingPattern = parsed.DrillingHoles;
+            Plan = null; Sim = null; IsRunning = false;
+            DrillingTrajectory = null;
+
+            // ① 先计算折线原始包围盒中心（居中前），作为两链路坐标对齐的公共基准
+            double origMinX = double.MaxValue, origMinY = double.MaxValue;
+            double origMaxX = double.MinValue, origMaxY = double.MinValue;
+            foreach (var pl in Polylines)
+            {
+                var pts = pl.Points;
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    var p = pts[i];
+                    if (p.X < origMinX) origMinX = p.X;
+                    if (p.Y < origMinY) origMinY = p.Y;
+                    if (p.X > origMaxX) origMaxX = p.X;
+                    if (p.Y > origMaxY) origMaxY = p.Y;
+                }
+            }
+            double origCx = (origMinX + origMaxX) / 2;
+            double origCy = (origMinY + origMaxY) / 2;
+
+            // ② 折线特征居中（按原始包围盒中心平移）
+            CenterPolylinesAtOrigin(Polylines);
+            GeometryCache = SceneGeometryCache.Build(Polylines);
+
+            // ③ 钻孔特征按同一平移量对齐（保证两链路坐标系一致）
+            //   关键：必须用“折线居中前”的原始中心，而非居中后的中心（后者≈(0,0)，会导致钻孔未平移）
+            if (DrillingPattern.Holes.Count > 0 && origMinX <= origMaxX)
+            {
+                var holes = DrillingPattern.Holes;
+                for (int i = 0; i < holes.Count; i++)
+                {
+                    var h = holes[i];
+                    h.X -= origCx;
+                    h.Y -= origCy;
+                    holes[i] = h;
+                }
+                DrillingPattern.RecomputeBounds();
+            }
+
+            string contourInfo = $"轮廓数：{Polylines.Count:N0}  顶点数：{GeometryCache?.VertexCount ?? 0:N0}";
+            string holeInfo = DrillingPattern.Holes.Count > 0
+                ? $"\n钻孔数：{DrillingPattern.Holes.Count:N0}（CIRCLE {parsed.CircleCount:N0}）"
+                : "\n钻孔数：0";
+            FileInfo = $"{Path.GetFileName(path)}\n{contourInfo}{holeInfo}\n加工总长：{GeometryCache?.TotalLength:F1} mm\n{FormatLayers(GeometryCache?.LayerCounts ?? new Dictionary<string, int>())}";
+            PlanInfo = "尚未分解（双模式：折线 + 钻孔）";
+            DrillingInfo = DrillingPattern.Holes.Count > 0
+                ? $"已导入 {DrillingPattern.Holes.Count:N0} 个孔"
+                : "";
+            RealtimeInfo = "";
+            SceneChanged?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"DXF 混合解析失败：{ex.Message}");
+            DrillingInfo = $"❌ 错误：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 双模式分离分解：折线链路与钻孔链路独立规划，互不干扰。
+    /// 折线链路：等时采样 → 频域分解 → 生成 Plan/Sim；
+    /// 钻孔链路：振镜优先聚类 → 环切轨迹 → 生成 DrillingTrajectory。
+    /// </summary>
+    public void DecomposeBoth()
+    {
+        // 折线链路
+        if (Polylines.Count > 0)
+        {
+            Decompose();
+        }
+        // 钻孔链路
+        if (DrillingPattern != null && DrillingPattern.Holes.Count > 0)
+        {
+            // 钻孔路径规划（振镜优先）
+            DrillingTrajectory = DrillPlanner.Plan(DrillingPattern, dwellTimeMs: 50.0,
+                galvoFov: GalvoFov, galvoFirst: true);
+            PlanInfo += $"\n\n[钻孔链路] 规划完成：{DrillingTrajectory.Moves.Count:N0} 个孔位移动";
+            DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 已规划路径";
+        }
+    }
+
     /// <summary>
     /// 钻孔轨迹 → 等时采样 → 频率分解 → 仿真准备（激光钻孔）。
     /// 孔间按快移速度插补（激光关）；到达孔位后按孔径做<b>环切 trepanning</b>：

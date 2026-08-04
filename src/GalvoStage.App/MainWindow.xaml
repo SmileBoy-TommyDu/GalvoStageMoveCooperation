@@ -183,6 +183,11 @@
                                             Style="{StaticResource RoundButton}" Background="#2F5AA8"/>
                                     <Button x:Name="BtnDrill" Content="导入钻孔 DXF…" Click="OnImportDrillClick"
                                             Style="{StaticResource RoundButton}" Background="#7B3F9E"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button x:Name="BtnMixed" Content="导入混合 DXF…" Click="OnImportMixedClick"
+                                            Style="{StaticResource RoundButton}" Background="#B85A1F"
+                                            ToolTipService.ToolTip="一次解析同时提取折线（轮廓）与钻孔（CIRCLE），双模式分离加工（09 号文档）"/>
                                     <Button x:Name="BtnDemo" Content="加载示例图形" Click="OnLoadDemoClick"
                                             Style="{StaticResource RoundButton}"/>
                                 </StackPanel>
@@ -220,9 +225,13 @@
                                 </TextBlock>
                                 <Slider Minimum="0.5" Maximum="40" Value="{Binding CutoffHz}"
                                         IsEnabled="{Binding AutoCutoff, Converter={x:Static local:InverseBoolConverter.Instance}}"/>
-                                <Button x:Name="BtnDecompose" Content="执行路径分解" Click="OnDecomposeClick"
-                                        Style="{StaticResource RoundButton}" Background="#2F5AA8" Margin="0,4,0,0"
-                                        HorizontalAlignment="Stretch"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                    <Button x:Name="BtnDecompose" Content="执行路径分解" Click="OnDecomposeClick"
+                                            Style="{StaticResource RoundButton}" Background="#2F5AA8"/>
+                                    <Button x:Name="BtnDecomposeBoth" Content="双模式分解" Click="OnDecomposeBothClick"
+                                            Style="{StaticResource RoundButton}" Background="#B85A1F"
+                                            ToolTipService.ToolTip="同时触发折线链路（频域分解）与钻孔链路（振镜优先聚类），双模式分离加工"/>
+                                </StackPanel>
                                 <TextBlock Text="{Binding PlanInfo}" Style="{StaticResource InfoText}" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>

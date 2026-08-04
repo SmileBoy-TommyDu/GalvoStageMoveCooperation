@@ -200,6 +200,58 @@ public partial class MainWindow : Window
         InvalidateCanvases();
     }
 
+    /// <summary>导入混合 DXF：一次解析同时提取折线（轮廓）与钻孔（CIRCLE），双模式分离加工</summary>
+    private void OnImportMixedClick(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "DXF 混合文件 (*.dxf)|*.dxf|所有文件 (*.*)|*.*",
+            Title = "导入混合 DXF（同时提取轮廓 + 钻孔）"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+        try
+        {
+            _vm.ImportMixed(dlg.FileName);
+            _fitPending = true;
+            InvalidateCanvases();
+
+            // 提示用户是否立即执行双模式分解
+            string summary = $"轮廓：{_vm.Polylines.Count:N0} 条\n钻孔：{_vm.DrillingPattern?.Holes.Count ?? 0:N0} 个";
+            var result = MessageBox.Show(
+                this,
+                $"已解析混合特征：\n{summary}\n\n是否立即执行双模式分解？\n（折线链路 + 钻孔链路独立规划）",
+                "双模式分离加工",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+
+            if (result == MessageBoxResult.Yes)
+            {
+                Mouse.OverrideCursor = Cursors.Wait;
+                try { _vm.DecomposeBoth(); }
+                finally { Mouse.OverrideCursor = null; }
+                InvalidateCanvases();
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"DXF 混合解析失败：{ex.Message}", "导入错误", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>双模式分解：同时触发折线链路（频域分解）与钻孔链路（振镜优先聚类）</summary>
+    private void OnDecomposeBothClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm.Polylines.Count == 0 && (_vm.DrillingPattern == null || _vm.DrillingPattern.Holes.Count == 0))
+        {
+            MessageBox.Show(this, "请先导入混合 DXF（同时包含轮廓与钻孔）。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        Mouse.OverrideCursor = Cursors.Wait;
+        try { _vm.DecomposeBoth(); }
+        finally { Mouse.OverrideCursor = null; }
+        InvalidateCanvases();
+    }
+
     private void OnStartPauseClick(object sender, RoutedEventArgs e)
     {
         if (_vm.Plan == null)
