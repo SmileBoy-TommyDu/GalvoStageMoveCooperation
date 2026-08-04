@@ -111,6 +111,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         Polylines = DxfParser.ParseFile(path);
         Plan = null; Sim = null; IsRunning = false;
+        // 清理上一次钻孔导入残留（避免先导入钻孔 DXF 再导入普通 DXF 时，钻孔点云仍留在画布）
+        DrillingPattern = null;
+        DrillingTrajectory = null;
+        DrillingInfo = "";
 
         CenterPolylinesAtOrigin(Polylines);
         GeometryCache = SceneGeometryCache.Build(Polylines);

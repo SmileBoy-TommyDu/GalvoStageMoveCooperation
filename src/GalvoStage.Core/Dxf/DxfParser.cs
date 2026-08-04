@@ -727,16 +727,20 @@ public static class DxfParser
 
     private static void AppendBulgeArc(List<Vec2> outPts, Vec2 p1, Vec2 p2, double bulge)
     {
+        // DXF 凸度规范：bulge = tan(包含角/4)，符号决定弧向与圆心相对弦的位置
+        //   bulge > 0：逆时针弧，圆心在弦的左侧（沿 p1→p2 方向看）
+        //   bulge < 0：顺时针弧，圆心在弦的右侧
+        // normal = (-dir.Y, dir.X) 为弦的左法线，故 center = mid + sign(bulge) * h * normal
         double theta = 4 * Math.Atan(bulge);          // 圆心角（带符号）
         double chord = p1.DistanceTo(p2);
         if (chord < 1e-9) return;
         double r = chord / (2 * Math.Sin(Math.Abs(theta) / 2));
-        // 圆心：位于弦的垂直平分线上
+        // 圆心：位于弦的垂直平分线上，符号由 bulge 决定
         Vec2 mid = (p1 + p2) * 0.5;
         double h = r * Math.Cos(Math.Abs(theta) / 2);  // 圆心到弦的距离
         Vec2 dir = (p2 - p1) / chord;
         Vec2 normal = new(-dir.Y, dir.X);
-        Vec2 center = bulge > 0 ? mid - normal * h : mid + normal * h;
+        Vec2 center = bulge > 0 ? mid + normal * h : mid - normal * h;
 
         double a0 = Math.Atan2(p1.Y - center.Y, p1.X - center.X);
         int n = ArcSegmentCount(r, theta);
