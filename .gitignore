@@ -15,3 +15,5 @@
 /tools/SmokeTest/obj
 /tools/ParseBench/bin/Release/net6.0
 /tools/ParseBench/obj
+/tools/GalvoFirstBench/bin/Debug/net6.0
+/tools/GalvoFirstBench/obj
