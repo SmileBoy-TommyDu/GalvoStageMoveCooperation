@@ -135,7 +135,7 @@ public static class SceneRenderer
         }
 
         DrawMouseCursorCrosshair(canvas, vt, width, height, mouseWorld);
-        DrawLegend(canvas, width);
+        DrawLegend(canvas, width, height);
     }
 
     /// <summary>
@@ -158,8 +158,11 @@ public static class SceneRenderer
         var br = vt.ToScreen(fov, -fov);
         using (var fovPaint = new SKPaint
         {
-            IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1.4f,
-            Color = FovColor.WithAlpha(200), PathEffect = SKPathEffect.CreateDash(new float[] { 6, 4 }, 0)
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.4f,
+            Color = FovColor.WithAlpha(200),
+            PathEffect = SKPathEffect.CreateDash(new float[] { 6, 4 }, 0)
         })
             canvas.DrawRect(tl.X, tl.Y, br.X - tl.X, br.Y - tl.Y, fovPaint);
 
@@ -226,7 +229,7 @@ public static class SceneRenderer
         double xStep = xSpan / maxMajorTicks;
         double xNice = NiceStep(xStep);
 
-        for (double x = Math.Floor(wx0 / xNice) * xNice; x <= wx1 + xNice/2; x += xNice)
+        for (double x = Math.Floor(wx0 / xNice) * xNice; x <= wx1 + xNice / 2; x += xNice)
         {
             var pos = vt.ToScreen(x, 0);
             // 主刻度（长）+ 数字标签 - 紧贴标尺下沿向上
@@ -239,7 +242,7 @@ public static class SceneRenderer
             if (subX <= wx1)
             {
                 var subPos = vt.ToScreen(subX, 0);
-                canvas.DrawLine(subPos.X, 40, subPos.X, 34, 
+                canvas.DrawLine(subPos.X, 40, subPos.X, 34,
                     new SKPaint { Color = RulerLine, StrokeWidth = 1 });
             }
 
@@ -261,7 +264,7 @@ public static class SceneRenderer
         double yStep = ySpan / yCount;
         double yNice = NiceStep(yStep);
 
-        for (double y = Math.Floor(wy0 / yNice) * yNice; y <= wy1 + yNice/2; y += yNice)
+        for (double y = Math.Floor(wy0 / yNice) * yNice; y <= wy1 + yNice / 2; y += yNice)
         {
             var pos = vt.ToScreen(0, y);
             paint.Color = RulerLine;
@@ -273,7 +276,7 @@ public static class SceneRenderer
             if (subY <= wy1)
             {
                 var subPos = vt.ToScreen(0, subY);
-                canvas.DrawLine(40, subPos.Y, 34, subPos.Y, 
+                canvas.DrawLine(40, subPos.Y, 34, subPos.Y,
                     new SKPaint { Color = RulerLine, StrokeWidth = 1 });
             }
 
@@ -283,11 +286,11 @@ public static class SceneRenderer
         }
 
         // 坐标轴标签
-        using var axisLabel = new SKPaint 
-        { 
-            Color = RulerLine.WithAlpha(200), 
-            TextSize = 12f, 
-            IsAntialias = true 
+        using var axisLabel = new SKPaint
+        {
+            Color = RulerLine.WithAlpha(200),
+            TextSize = 12f,
+            IsAntialias = true
         };
         canvas.DrawText("X 轴 (mm)", width / 2 - textPaint.MeasureText("X 轴 (mm)") / 2, 12, axisLabel);       // 顶部居中
         canvas.DrawText("Y 轴 (mm)", 2, 54, axisLabel);     // 左侧标尺顶端下方
@@ -357,25 +360,25 @@ public static class SceneRenderer
         float h = textHeight + 12f;
         //float bx = Math.Max(48f, Math.Min(p.X - w - 4, width - w - 48f));
         //float by = Math.Max(48f, Math.Min(p.Y - h - 6, height - h - 6f));
-        float bx = width-190;
-        float by =  height-35;
+        float bx = width - 190;
+        float by = height - 35;
 
         // 填充背景（深色圆角背景）
         using var bgPaint = new SKPaint { Color = MouseBgColor, Style = SKPaintStyle.Fill };
         canvas.DrawRoundRect(bx, by, w, h, 6, 6, bgPaint);
 
         // 气泡边框（亮色高光）
-        using var strokePaint = new SKPaint 
-        { 
-            Color = MouseHlColor.WithAlpha(255), 
-            StrokeWidth = 1.5f, 
-            IsAntialias = true 
+        using var strokePaint = new SKPaint
+        {
+            Color = MouseHlColor.WithAlpha(255),
+            StrokeWidth = 1.5f,
+            IsAntialias = true
         };
         canvas.DrawRoundRect(bx, by, w, h, 6, 6, strokePaint);
 
         // 添加阴影效果（可选增强版）
-        using var shadowPaint = new SKPaint 
-        { 
+        using var shadowPaint = new SKPaint
+        {
             Color = MouseBgColor.WithAlpha(180),
             Style = SKPaintStyle.Fill
         };
@@ -713,8 +716,11 @@ public static class SceneRenderer
         var stagePos = vt.ToScreen(sim.CurStageActX, sim.CurStageActY);
         using var fovPaint = new SKPaint
         {
-            IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1.4f,
-            Color = FovColor.WithAlpha(200), PathEffect = SKPathEffect.CreateDash(new float[] { 6, 4 }, 0)
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.4f,
+            Color = FovColor.WithAlpha(200),
+            PathEffect = SKPathEffect.CreateDash(new float[] { 6, 4 }, 0)
         };
         canvas.DrawRect(stagePos.X - fovPx, stagePos.Y - fovPx, fovPx * 2, fovPx * 2, fovPaint);
 
@@ -740,7 +746,7 @@ public static class SceneRenderer
         canvas.DrawCircle(spot, 4, spotFill);
     }
 
-    private static void DrawLegend(SKCanvas canvas, float width)
+    private static void DrawLegend(SKCanvas canvas, float width, float height)
     {
         using var font = new SKFont(SKTypeface.FromFamilyName("Microsoft YaHei"), 13);
         using var text = new SKPaint { IsAntialias = true };
@@ -759,9 +765,9 @@ public static class SceneRenderer
         foreach (var (color, label) in items)
         {
             using var sw = new SKPaint { Color = color, StrokeWidth = 4, IsAntialias = true };
-            canvas.DrawLine(x, y - 4, x + 22, y - 4, sw);
+            canvas.DrawLine(width - 32, y - 4, width - 10, y - 4, sw);
             text.Color = new SKColor(0xCC, 0xCC, 0xD4);
-            canvas.DrawText(label, x + 28, y, font, text);
+            canvas.DrawText(label, width - 150, y, font, text);
             y += 20;
         }
     }
