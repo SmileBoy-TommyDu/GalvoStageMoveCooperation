@@ -113,8 +113,8 @@ public static class DrillPlanner
         }
 
         // 3. 计数排序分桶：O(n) 把孔分配到 (dimX × dimY) 网格
-        var cellOf = new int[n];
-        var cellCount = new int[totalCells];
+        var cellOf = new int[n];  // 记录“每个孔属于哪个格子”的编号
+        var cellCount = new int[totalCells];  // 记录“每个格里有多少个孔”
         for (int i = 0; i < n; i++)
         {
             int cx = Math.Clamp((int)((holes[i].X - minX) / cellSize), 0, dimX - 1);
