@@ -123,4 +123,17 @@ public sealed class TrepanParams
     {
         return $"Power={Power}W, Rings={OffsetRings}, Feed={FeedRate}mm/s, Hold={HoldTime}ms";
     }
+    
+    /// <summary>
+    /// 获取该档位的可视化颜色索引（用于仿真动画）
+    /// 0=青色 (微孔), 1=绿色 (小孔), 2=黄色 (中孔), 3=橙色 (大孔), 4=红色 (特大孔)
+    /// </summary>
+    public int GetColorIndex()
+    {
+        if (Power <= 5000) return 0;         // 微孔：青色
+        else if (Power <= 8000) return 1;    // 小孔：绿色
+        else if (Power <= 12000) return 2;   // 中孔：黄色
+        else if (Power <= 15000) return 3;   // 大孔：橙色
+        else return 4;                       // 特大孔：红色
+    }
 }

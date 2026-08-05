@@ -285,20 +285,51 @@ public partial class MainWindow : Window
         }
     }
     
-    /// <summary>打开工艺参数配置对话框</summary>
+    /// <summary>打开工艺参数配置对话框（增强版：多档位独立配置）</summary>
     private void OnConfigTrepanParamsClick(object sender, RoutedEventArgs e)
     {
-        var dialog = new TrepanParamsDialog(
-            GalvoStage.Core.Drilling.TrepanParams.MediumHole, 
-            "中孔 (1-3mm)");
+        var dialog = new TrepanParamsDialogEx();
         
         if (dialog.ShowDialog() == true)
         {
-            var result = dialog.GetResult();
+            var results = dialog.GetResults();
             MessageBox.Show(this, 
-                $"工艺参数已更新：\n{result}", 
+                $"工艺参数已更新（4 档独立配置）：\n" +
+                $"微孔：{results[0]}\n" +
+                $"小孔：{results[1]}\n" +
+                $"大孔：{results[2]}\n" +
+                $"特大孔：{results[3]}", 
                 "配置成功", MessageBoxButton.OK, MessageBoxImage.Information);
         }
+    }
+    
+    /// <summary>切换环切动画显示</summary>
+    private void OnToggleTrepanAnimationClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm.TrepanAnimationFrames == null || _vm.TrepanAnimationFrames.Count == 0)
+        {
+            MessageBox.Show(this, "请先执行双模式分解生成环切动画。", "提示", 
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        _vm.ShowTrepanAnimation = !_vm.ShowTrepanAnimation;
+        InvalidateCanvases();
+    }
+    
+    /// <summary>显示下一帧环切动画</summary>
+    private void OnNextFrameClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm.TrepanAnimationFrames == null || _vm.TrepanAnimationFrames.Count == 0)
+        {
+            MessageBox.Show(this, "请先执行双模式分解生成环切动画。", "提示", 
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        _vm.CurrentAnimationFrame = (_vm.CurrentAnimationFrame + 1) % _vm.TrepanAnimationFrames.Count;
+        _vm.ShowTrepanAnimation = true;
+        InvalidateCanvases();
     }
 
     private void OnStartPauseClick(object sender, RoutedEventArgs e)

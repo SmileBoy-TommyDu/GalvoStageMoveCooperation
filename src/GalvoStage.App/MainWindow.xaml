@@ -239,7 +239,15 @@
                                     <Button x:Name="BtnConfigTrepanParams" Content="配置工艺参数" Click="OnConfigTrepanParamsClick"
                                             Style="{StaticResource RoundButton}" Background="#7A1F7A"
                                             ToolTipService.ToolTip="打开工艺参数配置对话框，自定义各档位的激光功率、圈数、进给等参数"/>
+                                    <Button x:Name="BtnToggleTrepanAnimation" Content="环切动画" Click="OnToggleTrepanAnimationClick"
+                                            Style="{StaticResource RoundButton}" Background="#1F5A7A"
+                                            ToolTipService.ToolTip="启用/禁用环切轨迹动画可视化"/>
+                                    <Button x:Name="BtnNextFrame" Content="下一帧" Click="OnNextFrameClick"
+                                            Style="{StaticResource RoundButton}" Background="#4A4A4A"
+                                            ToolTipService.ToolTip="显示下一帧环切动画"/>
                                 </StackPanel>
+                                <CheckBox Content="显示环切动画" IsChecked="{Binding ShowTrepanAnimation}" Margin="0,8,0,0"/>
+                                <TextBlock Text="{Binding TrepanAnimationDuration, StringFormat='动画时长：{0:F0} ms'}" Style="{StaticResource InfoText}" Margin="0,4,0,0"/>
                                 <TextBlock Text="{Binding PlanInfo}" Style="{StaticResource InfoText}" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>

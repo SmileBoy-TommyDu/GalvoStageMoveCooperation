@@ -27,6 +27,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
         field = value; Raise(name); return true;
     }
 
+    // ================= 环切动画状态 =================
+    private bool _showTrepanAnimation = false;
+    public bool ShowTrepanAnimation { get => _showTrepanAnimation; set => Set(ref _showTrepanAnimation, value); }
+    
+    private int _currentAnimationFrame = 0;
+    public int CurrentAnimationFrame { get => _currentAnimationFrame; set => Set(ref _currentAnimationFrame, value); }
+    
+    private List<List<TrepanAnimationGenerator.TrepanPoint>>? _trepanAnimationFrames;
+    public List<List<TrepanAnimationGenerator.TrepanPoint>>? TrepanAnimationFrames 
+    { 
+        get => _trepanAnimationFrames; 
+        set => Set(ref _trepanAnimationFrames, value); 
+    }
+    
+    private double _trepanAnimationDuration = 0;
+    public double TrepanAnimationDuration 
+    { 
+        get => _trepanAnimationDuration; 
+        set => Set(ref _trepanAnimationDuration, value); 
+    }
+
     // ================= 工艺参数 =================
     private double _feedSpeed = 80;
     public double FeedSpeed { get => _feedSpeed; set => Set(ref _feedSpeed, value); }
@@ -421,6 +442,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 galvoFov: GalvoFov, galvoFirst: true);
             PlanInfo += $"\n\n[钻孔链路] 规划完成：{DrillingTrajectory.Moves.Count:N0} 个孔位移动";
             DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 已规划路径";
+            
+            // ③ 生成环切动画帧（用于 UI 可视化）
+            TrepanAnimationFrames = TrepanAnimationGenerator.GenerateAnimationFrames(
+                DrillingPattern, samplesPerRing: 36);
+            TrepanAnimationDuration = TrepanAnimationGenerator.CalculateTotalDuration(
+                DrillingPattern);
+            CurrentAnimationFrame = 0;
+            PlanInfo += $"\n环切动画：{TrepanAnimationFrames.Count} 帧，预计时长 {TrepanAnimationDuration:F0} ms";
         }
     }
 

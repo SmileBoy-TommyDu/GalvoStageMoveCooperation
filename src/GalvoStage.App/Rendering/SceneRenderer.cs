@@ -117,6 +117,10 @@ public static class SceneRenderer
         // 3) PCB 钻孔顺序轨迹（橙色连线）
         if (drillTraj != null && drillTraj.Moves.Count > 1)
             DrawDrillingTrajectory(canvas, paint, vt, drillTraj);
+        
+        // 3.5) 环切动画（如果启用）
+        if (vm.ShowTrepanAnimation && vm.TrepanAnimationFrames != null)
+            DrawTrepanAnimation(canvas, paint, vt, vm.TrepanAnimationFrames, vm.CurrentAnimationFrame);
 
         // 4) 实时加工轨迹
         if (sim != null && sim.Index > 1)
@@ -654,6 +658,72 @@ public static class SceneRenderer
             path.LineTo(vt.ToScreen(moves[i].Position.X, moves[i].Position.Y));
         canvas.DrawPath(path, paint);
         (paint.Color, paint.StrokeWidth) = saved;
+    }
+    
+    /// <summary>环切动画渲染：显示当前帧的环切轨迹</summary>
+    private static void DrawTrepanAnimation(SKCanvas canvas, SKPaint paint, ViewTransform vt,
+        List<List<Core.Drilling.TrepanAnimationGenerator.TrepanPoint>> frames, int currentFrame)
+    {
+        if (frames == null || frames.Count == 0 || currentFrame >= frames.Count) return;
+        
+        var frame = frames[currentFrame];
+        if (frame.Count < 2) return;
+        
+        var saved = (paint.Color, paint.StrokeWidth, paint.Style);
+        
+        // 绘制环切轨迹
+        using var path = new SKPath();
+        bool first = true;
+        foreach (var pt in frame)
+        {
+            var screenPt = vt.ToScreen(pt.Position.X, pt.Position.Y);
+            if (first)
+            {
+                path.MoveTo(screenPt);
+                first = false;
+            }
+            else
+            {
+                path.LineTo(screenPt);
+            }
+        }
+        
+        // 根据功率设置颜色
+        if (frame.Count > 0 && frame[0].IsLaserOn)
+        {
+            int colorIndex = 0;
+            double power = frame[0].Power;
+            if (power <= 5000) colorIndex = 0;         // 青色
+            else if (power <= 8000) colorIndex = 1;    // 绿色
+            else if (power <= 12000) colorIndex = 2;   // 黄色
+            else if (power <= 15000) colorIndex = 3;   // 橙色
+            else colorIndex = 4;                       // 红色
+            
+            var colors = new[] { 
+                SKColors.Cyan, SKColors.Lime, SKColors.Yellow, 
+                SKColors.Orange, SKColors.Red 
+            };
+            paint.Color = colors[colorIndex].WithAlpha(200);
+        }
+        else
+        {
+            paint.Color = SKColors.Gray.WithAlpha(100);  // 激光关闭/冷却
+        }
+        
+        paint.StrokeWidth = 2f;
+        paint.Style = SKPaintStyle.Stroke;
+        canvas.DrawPath(path, paint);
+        
+        // 绘制起点标记
+        if (frame.Count > 0)
+        {
+            var startPt = vt.ToScreen(frame[0].Position.X, frame[0].Position.Y);
+            paint.Color = SKColors.White;
+            paint.Style = SKPaintStyle.Fill;
+            canvas.DrawCircle(startPt, 4f, paint);
+        }
+        
+        (paint.Color, paint.StrokeWidth, paint.Style) = saved;
     }
 
     private static void FlushPoints(SKCanvas canvas, SKPaint paint, SKPoint[] buf, int count)
