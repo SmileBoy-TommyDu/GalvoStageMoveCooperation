@@ -34,6 +34,9 @@ public static class DrillPlanner
         public int HoleCount => Moves.Count;
         public double TotalDurationMs => Moves.Count * 50; // 简化估算：每孔 50ms
         
+        /// <summary>采样后的轨迹（用于激光控制）</summary>
+        public Core.PathPlanning.SampledTrajectory? SampledTrajectory { get; set; }
+        
         public override string ToString() => $"{HoleCount:N0} 孔，~{(TotalDurationMs/1000):.0}s";
     }
 
@@ -42,8 +45,12 @@ public static class DrillPlanner
     /// <param name="dwellTimeMs">单孔停留时间 (ms)</param>
     /// <param name="galvoFov">振镜半视场 (mm)，用于振镜优先聚类的网格尺寸；&lt;=0 时退化为纯路径最短</param>
     /// <param name="galvoFirst">振镜优先策略：按振镜视场网格聚类，簇内全走振镜，仅簇间才动平台——大幅减少平台跳跃次数</param>
+    /// <param name="jumpSpeedPlatform">平台空移速度 (mm/s)，用于采样</param>
+    /// <param name="jumpSpeedGalvo">振镜空移速度 (mm/s)，用于采样</param>
+    /// <param name="sampleRate">采样频率 (Hz)</param>
     public static DrillingTrajectory Plan(Geometry.Drilling.DrillingPattern pattern,
-        double dwellTimeMs = 50.0, double galvoFov = 5.0, bool galvoFirst = false)
+        double dwellTimeMs = 50.0, double galvoFov = 5.0, bool galvoFirst = false,
+        double jumpSpeedPlatform = 500.0, double jumpSpeedGalvo = 2000.0, double sampleRate = 1000.0)
     {
         if (pattern.Holes.Count == 0)
             return new DrillingTrajectory();
@@ -69,6 +76,10 @@ public static class DrillPlanner
                 ProcessParams = h.ProcessParams
             });
         }
+        
+        // 生成采样轨迹（用于激光控制）
+        trajectory.SampledTrajectory = SampleDrillingTrajectory(
+            trajectory.Moves, jumpSpeedPlatform, jumpSpeedGalvo, sampleRate, dwellTimeMs);
 
         return trajectory;
     }
@@ -229,6 +240,87 @@ public static class DrillPlanner
                       ((ulong)(y & (1 << i)) << (2 * i + 1));
         }
         return result;
+    }
+    
+    /// <summary>将钻孔移动序列转换为采样轨迹（确保孔间移动激光关闭）</summary>
+    private static Core.PathPlanning.SampledTrajectory SampleDrillingTrajectory(
+        List<HoleMove> moves, double jumpSpeedPlatform, double jumpSpeedGalvo, 
+        double sampleRate, double dwellTimeMs)
+    {
+        if (moves.Count == 0) return new Core.PathPlanning.SampledTrajectory();
+        
+        var xs = new List<double>(1 << 16);
+        var ys = new List<double>(1 << 16);
+        var laser = new List<bool>(1 << 16);
+        
+        double dt = 1.0 / sampleRate;
+        double rapidSpeed = Math.Min(
+            Math.Sqrt(jumpSpeedPlatform * jumpSpeedPlatform + jumpSpeedGalvo * jumpSpeedGalvo),
+            1000.0);  // 限制最大 1000 mm/s
+        double step = rapidSpeed * dt;
+        
+        Vec2 cur = moves[0].Position;
+        
+        for (int i = 0; i < moves.Count; i++)
+        {
+            var move = moves[i];
+            
+            // 1. 空程移动到孔位（激光关闭）
+            if (i > 0)
+            {
+                // 空程前：确保激光关闭
+                if (xs.Count == 0 || xs[^1] != cur.X || ys[^1] != cur.Y)
+                {
+                    xs.Add(cur.X);
+                    ys.Add(cur.Y);
+                    laser.Add(false);
+                }
+                
+                // 空程移动到目标孔位
+                double len = cur.DistanceTo(move.Position);
+                if (len > 1e-12)
+                {
+                    double s = step;
+                    while (s < len)
+                    {
+                        double t = s / len;
+                        xs.Add(cur.X + (move.Position.X - cur.X) * t);
+                        ys.Add(cur.Y + (move.Position.Y - cur.Y) * t);
+                        laser.Add(false);  // 空程激光关闭
+                        s += step;
+                    }
+                }
+                
+                // 空程结束：确保激光关闭
+                if (xs.Count == 0 || xs[^1] != move.Position.X || ys[^1] != move.Position.Y)
+                {
+                    xs.Add(move.Position.X);
+                    ys.Add(move.Position.Y);
+                    laser.Add(false);
+                }
+            }
+            
+            // 2. 钻孔位置（激光开启，停留）
+            int dwellSamples = (int)(dwellTimeMs / 1000.0 / dt);
+            dwellSamples = Math.Max(dwellSamples, 1);  // 至少 1 个采样点
+            
+            for (int j = 0; j < dwellSamples; j++)
+            {
+                xs.Add(move.Position.X);
+                ys.Add(move.Position.Y);
+                laser.Add(true);  // 钻孔激光开启
+            }
+            
+            cur = move.Position;
+        }
+        
+        return new Core.PathPlanning.SampledTrajectory
+        {
+            SampleRate = sampleRate,
+            X = xs.ToArray(),
+            Y = ys.ToArray(),
+            LaserOn = laser.ToArray()
+        };
     }
 
     /// <summary>Z-order 曲线（莫顿码）分区排序（用于超大规模数据）</summary>

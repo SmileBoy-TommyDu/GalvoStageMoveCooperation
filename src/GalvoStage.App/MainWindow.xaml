@@ -207,6 +207,9 @@
                         <Border Style="{StaticResource CardStyle}">
                             <StackPanel>
                                 <TextBlock Text="②  频率分解（平台低频 + 振镜高频）" Style="{StaticResource SectionHeader}"/>
+                                
+                                <!-- 基本参数 -->
+                                <TextBlock Text="基本参数" FontWeight="Bold" Margin="0,4,0,2"/>
                                 <TextBlock Style="{StaticResource ParamLabel}">
                                     <Run Text="进给速度"/><Run Text="{Binding FeedSpeed, StringFormat=' {0:F0} mm/s'}" Foreground="#C7D6F0"/>
                                 </TextBlock>
@@ -219,7 +222,32 @@
                                     <Run Text="振镜半视场"/><Run Text="{Binding GalvoFov, StringFormat=' ±{0:F1} mm'}" Foreground="#C7D6F0"/>
                                 </TextBlock>
                                 <Slider Minimum="1" Maximum="25" Value="{Binding GalvoFov}" TickFrequency="0.5" IsSnapToTickEnabled="True"/>
-                                <CheckBox Content="自动搜索最优截止频率（最低平台加速度）" IsChecked="{Binding AutoCutoff}"/>
+                                
+                                <!-- 运动动力学参数 -->
+                                <TextBlock Text="运动动力学参数" FontWeight="Bold" Margin="0,8,0,2"/>
+                                <TextBlock Style="{StaticResource ParamLabel}">
+                                    <Run Text="平台空移速度"/><Run Text="{Binding JumpSpeedPlatform, StringFormat=' {0:F0} mm/s'}" Foreground="#C7D6F0"/>
+                                </TextBlock>
+                                <Slider Minimum="100" Maximum="1000" Value="{Binding JumpSpeedPlatform}" TickFrequency="50" IsSnapToTickEnabled="True"/>
+                                <TextBlock Style="{StaticResource ParamLabel}">
+                                    <Run Text="振镜空移速度"/><Run Text="{Binding JumpSpeedGalvo, StringFormat=' {0:F0} mm/s'}" Foreground="#C7D6F0"/>
+                                </TextBlock>
+                                <Slider Minimum="500" Maximum="5000" Value="{Binding JumpSpeedGalvo}" TickFrequency="100" IsSnapToTickEnabled="True"/>
+                                <TextBlock Style="{StaticResource ParamLabel}">
+                                    <Run Text="平台加速度"/><Run Text="{Binding AccelPlatform, StringFormat=' {0:F0} mm/s²'}" Foreground="#C7D6F0"/>
+                                </TextBlock>
+                                <Slider Minimum="100" Maximum="3000" Value="{Binding AccelPlatform}" TickFrequency="100" IsSnapToTickEnabled="True"/>
+                                <TextBlock Style="{StaticResource ParamLabel}">
+                                    <Run Text="振镜加速度"/><Run Text="{Binding AccelGalvo, StringFormat=' {0:F0} mm/s²'}" Foreground="#C7D6F0"/>
+                                </TextBlock>
+                                <Slider Minimum="1000" Maximum="10000" Value="{Binding AccelGalvo}" TickFrequency="500" IsSnapToTickEnabled="True"/>
+                                <TextBlock Style="{StaticResource ParamLabel}">
+                                    <Run Text="拐角系数"/><Run Text="{Binding CornerFactor, StringFormat=' {0:F2} (0=尖角 1=圆滑)'}" Foreground="#C7D6F0"/>
+                                </TextBlock>
+                                <Slider Minimum="0" Maximum="1" Value="{Binding CornerFactor}" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                                
+                                <!-- 截止频率 -->
+                                <CheckBox Content="自动搜索最优截止频率（最低平台加速度）" IsChecked="{Binding AutoCutoff}" Margin="0,8,0,4"/>
                                 <TextBlock Style="{StaticResource ParamLabel}">
                                     <Run Text="截止频率"/><Run Text="{Binding CutoffHz, StringFormat=' {0:F2} Hz'}" Foreground="#C7D6F0"/>
                                 </TextBlock>

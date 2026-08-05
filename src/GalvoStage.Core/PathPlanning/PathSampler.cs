@@ -29,11 +29,28 @@ public static class PathSampler
     /// <summary>轮廓数超过此值时最近邻排序改用空间网格加速</summary>
     private const int GridOrderThreshold = 5_000;
 
+    /// <param name="feedSpeed">进给速度 (mm/s)，激光出光时的加工速度</param>
+    /// <param name="jumpSpeedPlatform">平台空移速度 (mm/s)，激光关闭时平台的快速移动速度</param>
+    /// <param name="jumpSpeedGalvo">振镜空移速度 (mm/s)，激光关闭时振镜的快速扫描速度</param>
+    /// <param name="sampleRate">采样频率 (Hz)</param>
     /// <param name="cornerAngleDeg">尖角保真阈值：内角小于该值的折线顶点强制作为采样点（顶点吸附），
     /// 避免尖角被等时采样弦切。默认 150°；设为 ≥180 可关闭该特性。</param>
+    /// <param name="accelPlatform">平台加速度 (mm/s²)，用于计算平台加速段长度。默认 1000 mm/s²。</param>
+    /// <param name="accelGalvo">振镜加速度 (mm/s²)，用于计算振镜加速段长度。默认 5000 mm/s²。</param>
+    /// <param name="cornerFactor">拐角系数 (0.0-1.0)，控制尖角处的速度衰减。0=不减速，1=完全停止。默认 0.5。</param>
+    /// <param name="decelPlatform">平台减速度 (mm/s²)，用于计算减速段长度。默认等于 accelPlatform。</param>
     public static SampledTrajectory Sample(IReadOnlyList<PathPolyline> polylines,
-        double feedSpeed, double rapidSpeed, double sampleRate, double cornerAngleDeg = 150)
+        double feedSpeed, double jumpSpeedPlatform, double jumpSpeedGalvo, double sampleRate, 
+        double cornerAngleDeg = 150, double accelPlatform = 1000.0, double accelGalvo = 5000.0, 
+        double cornerFactor = 0.5, double decelPlatform = 0)
     {
+        // 计算合成空移速度（平台和振镜的向量和）
+        // 物理模型：V_rapid = √(V_platform² + V_galvo²)
+        double rapidSpeed = Math.Sqrt(jumpSpeedPlatform * jumpSpeedPlatform + jumpSpeedGalvo * jumpSpeedGalvo);
+        
+        // 限制最大速度，防止过快导致采样点过疏
+        rapidSpeed = Math.Min(rapidSpeed, 1000.0);  // 最大 1000 mm/s
+        
         var ordered = OrderByNearest(polylines);
         var xs = new List<double>(1 << 16);
         var ys = new List<double>(1 << 16);
@@ -50,14 +67,43 @@ public static class PathSampler
             var pts = new List<Vec2>(pl.Points);
             if (pl.Closed && pts.Count > 1 && !pts[0].Equals(pts[^1])) pts.Add(pts[0]);
 
-            // 空程：当前位置 -> 轮廓起点
+            // 空程前：确保当前位置的激光状态为关闭（防止轮廓段结束时激光误开启）
+            if (xs.Count == 0 || xs[^1] != cur.X || ys[^1] != cur.Y)
+            {
+                xs.Add(cur.X);
+                ys.Add(cur.Y);
+                laser.Add(false);  // 强制关闭激光
+            }
+
+            // 空程：当前位置 -> 轮廓起点（使用 rapidSpeed，恒定速度）
             residual = InterpolateSegment(cur, pts[0], rapidSpeed * dt, residual, xs, ys, laser, false);
             cur = pts[0];
+            
+            // 空程结束：确保到达轮廓起点前激光已关闭
+            if (xs.Count == 0 || xs[^1] != cur.X || ys[^1] != cur.Y)
+            {
+                xs.Add(cur.X);
+                ys.Add(cur.Y);
+                laser.Add(false);  // 强制关闭激光
+            }
 
             // 轮廓段
             for (int i = 1; i < pts.Count; i++)
             {
-                residual = InterpolateSegment(cur, pts[i], feedSpeed * dt, residual, xs, ys, laser, true);
+                // 计算当前段的速度（考虑拐角系数）
+                double segmentSpeed = feedSpeed;
+                
+                // 如果是尖角，根据 cornerFactor 衰减速度
+                if (i > 1 && snapCorners && IsSharpCorner(pts[i - 2], pts[i - 1], pts[i], cornerCos))
+                {
+                    // 尖角处的速度 = feedSpeed * (1 - cornerFactor)
+                    segmentSpeed = feedSpeed * (1.0 - cornerFactor);
+                    
+                    // 如果速度过低，至少保持 feedSpeed 的 10%
+                    segmentSpeed = Math.Max(segmentSpeed, feedSpeed * 0.1);
+                }
+                
+                residual = InterpolateSegment(cur, pts[i], segmentSpeed * dt, residual, xs, ys, laser, true);
                 cur = pts[i];
 
                 // 尖角保真：顶点非采样点时，若转角够尖则强制吸附该顶点并重置采样相位
@@ -99,6 +145,112 @@ public static class PathSampler
             s += step;
         }
         return step - (s - len);         // 新的剩余相位
+    }
+    
+    /// <summary>计算加速段和减速段的距离</summary>
+    private static (double accelDist, double fullSpeedDist, double decelDist) 
+        CalculateAccelDecelDistances(double currentSpeed, double targetSpeed, double accel, double decel)
+    {
+        // 加速距离：s = (v_final² - v_initial²) / (2 * a)
+        double accelDist = (targetSpeed * targetSpeed - currentSpeed * currentSpeed) / (2.0 * accel);
+        accelDist = Math.Max(0, accelDist);  // 防止负值
+        
+        // 减速距离：s = (v_final² - v_initial²) / (2 * a)
+        double decelDist = (targetSpeed * targetSpeed - targetSpeed * targetSpeed) / (2.0 * decel);
+        decelDist = Math.Max(0, decelDist);
+        
+        return (accelDist, 0, decelDist);  // 简化版本，fullSpeedDist 需要在调用处计算
+    }
+    
+    /// <summary>沿线段以变步距采样（考虑加减速），返回跨段剩余相位</summary>
+    private static double InterpolateSegmentWithAccel(
+        Vec2 a, Vec2 b, double targetSpeed, double accel, double decel, double dt,
+        double residual, List<double> xs, List<double> ys, List<bool> laser, bool laserOn,
+        ref double currentSpeed)
+    {
+        double len = a.DistanceTo(b);
+        if (len < 1e-12) return residual;
+        
+        // 计算加速段和减速段长度
+        double accelDist = Math.Max(0, (targetSpeed * targetSpeed - currentSpeed * currentSpeed) / (2.0 * accel));
+        double decelDist = Math.Max(0, (targetSpeed * targetSpeed) / (2.0 * decel));  // 减速到 0
+        
+        // 如果线段太短，无法完成加速和减速
+        if (len < accelDist + decelDist)
+        {
+            // 按比例分配加速和减速
+            double ratio = accel / (accel + decel);
+            accelDist = len * ratio;
+            decelDist = len * (1 - ratio);
+        }
+        
+        double fullSpeedDist = len - accelDist - decelDist;
+        fullSpeedDist = Math.Max(0, fullSpeedDist);
+        
+        // 分三段采样：加速段、匀速段、减速段
+        double s = -residual;  // 当前弧长位置
+        
+        // 最小步长：防止速度过低时死循环
+        double minStep = len / 10000.0;  // 至少走 1/10000 的线段长度
+        
+        // 1. 加速段
+        while (s < accelDist && s < len)
+        {
+            // 计算当前位置的速度（线性加速）
+            double localSpeed = currentSpeed + (accel * s / Math.Max(accelDist, 1e-9));
+            localSpeed = Math.Min(localSpeed, targetSpeed);
+            
+            double step = Math.Max(localSpeed * dt, minStep);  // 保证最小步长
+            s += step;
+            
+            if (s <= len)
+            {
+                double t = s / len;
+                xs.Add(a.X + (b.X - a.X) * t);
+                ys.Add(a.Y + (b.Y - a.Y) * t);
+                laser.Add(laserOn);
+            }
+        }
+        
+        // 2. 匀速段
+        while (s < accelDist + fullSpeedDist && s < len)
+        {
+            double step = Math.Max(targetSpeed * dt, minStep);
+            s += step;
+            
+            if (s <= len)
+            {
+                double t = s / len;
+                xs.Add(a.X + (b.X - a.X) * t);
+                ys.Add(a.Y + (b.Y - a.Y) * t);
+                laser.Add(laserOn);
+            }
+        }
+        
+        // 3. 减速段
+        while (s < len)
+        {
+            double distInDecel = s - accelDist - fullSpeedDist;
+            double localSpeed = targetSpeed - (decel * distInDecel / Math.Max(decelDist, 1e-9));
+            localSpeed = Math.Max(localSpeed, 0);
+            
+            double step = Math.Max(localSpeed * dt, minStep);  // 保证最小步长
+            s += step;
+            
+            if (s <= len)
+            {
+                double t = s / len;
+                xs.Add(a.X + (b.X - a.X) * t);
+                ys.Add(a.Y + (b.Y - a.Y) * t);
+                laser.Add(laserOn);
+            }
+        }
+        
+        // 更新当前速度
+        currentSpeed = targetSpeed;
+        
+        // 返回剩余相位
+        return Math.Max(0, len - s);
     }
 
     /// <summary>取顶点 pts[i] 的「下一个」邻居（闭合轮廓在末点回绕到 pts[1]）；开折线末端无邻居返回 false。</summary>

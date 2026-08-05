@@ -58,6 +58,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private double _sampleRate = 1000;
     public double SampleRate { get => _sampleRate; set => Set(ref _sampleRate, value); }
 
+    // ================= 运动动力学参数 =================
+    private double _jumpSpeedPlatform = 500;  // 平台空移速度 (mm/s)
+    public double JumpSpeedPlatform { get => _jumpSpeedPlatform; set => Set(ref _jumpSpeedPlatform, value); }
+    
+    private double _jumpSpeedGalvo = 2000;    // 振镜空移速度 (mm/s)
+    public double JumpSpeedGalvo { get => _jumpSpeedGalvo; set => Set(ref _jumpSpeedGalvo, value); }
+    
+    private double _accelPlatform = 1000;     // 平台加速度 (mm/s²)
+    public double AccelPlatform { get => _accelPlatform; set => Set(ref _accelPlatform, value); }
+    
+    private double _accelGalvo = 5000;        // 振镜加速度 (mm/s²)
+    public double AccelGalvo { get => _accelGalvo; set => Set(ref _accelGalvo, value); }
+    
+    private double _cornerFactor = 0.5;       // 拐角系数 (0.0-1.0, 0=尖角，1=圆滑)
+    public double CornerFactor { get => _cornerFactor; set => Set(ref _cornerFactor, value); }
+    
+    private double _decelPlatform = 1000;     // 平台减速度 (mm/s²)
+    public double DecelPlatform { get => _decelPlatform; set => Set(ref _decelPlatform, value); }
+
     // ================= 频率分解参数 =================
     private bool _autoCutoff = true;
     public bool AutoCutoff { get => _autoCutoff; set => Set(ref _autoCutoff, value); }
@@ -219,17 +238,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 // 阶段①：仅在代表子集上自动搜索截止频率（昂贵的 18 次 filtfilt 迭代只跑子集）
                 var subset = PathSampler.Decimate(Polylines, PathSampler.MaxSampleContours);
-                var subsetTraj = PathSampler.Sample(subset, FeedSpeed, RapidSpeed, SampleRate);
+                var subsetTraj = PathSampler.Sample(subset, FeedSpeed, JumpSpeedPlatform, JumpSpeedGalvo, SampleRate, 
+                    cornerAngleDeg: 150, accelPlatform: AccelPlatform, accelGalvo: AccelGalvo, cornerFactor: CornerFactor);
                 double cutoff = FrequencyDecomposer.DecomposeAuto(subsetTraj, GalvoFov).CutoffHz;
 
                 // 阶段②：全量采样 + 固定截止频率单次分解（不丢任何轮廓）
-                var traj = PathSampler.Sample(Polylines, FeedSpeed, RapidSpeed, SampleRate);
+                var traj = PathSampler.Sample(Polylines, FeedSpeed, JumpSpeedPlatform, JumpSpeedGalvo, SampleRate,
+                    cornerAngleDeg: 150, accelPlatform: AccelPlatform, accelGalvo: AccelGalvo, cornerFactor: CornerFactor);
                 Plan = FrequencyDecomposer.Decompose(traj, cutoff, GalvoFov);
                 note = $"截止频率在 {subset.Count:N0}/{Polylines.Count:N0} 代表子集上估得，全量分解\n";
             }
             else
             {
-                var traj = PathSampler.Sample(Polylines, FeedSpeed, RapidSpeed, SampleRate);
+                var traj = PathSampler.Sample(Polylines, FeedSpeed, JumpSpeedPlatform, JumpSpeedGalvo, SampleRate,
+                    cornerAngleDeg: 150, accelPlatform: AccelPlatform, accelGalvo: AccelGalvo, cornerFactor: CornerFactor);
                 Plan = FrequencyDecomposer.DecomposeAuto(traj, GalvoFov);
                 note = "";
             }
@@ -238,7 +260,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         else
         {
             // 手动截止频率：无需估参，直接全量采样 + 单次分解
-            var traj = PathSampler.Sample(Polylines, FeedSpeed, RapidSpeed, SampleRate);
+            var traj = PathSampler.Sample(Polylines, FeedSpeed, JumpSpeedPlatform, JumpSpeedGalvo, SampleRate,
+                cornerAngleDeg: 150, accelPlatform: AccelPlatform, accelGalvo: AccelGalvo, cornerFactor: CornerFactor);
             Plan = FrequencyDecomposer.Decompose(traj, CutoffHz, GalvoFov);
             note = "";
         }
@@ -437,9 +460,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 holes[i] = h;
             }
             
-            // ② 钻孔路径规划（振镜优先）
+            // ② 钻孔路径规划（振镜优先，添加采样参数）
             DrillingTrajectory = DrillPlanner.Plan(DrillingPattern, dwellTimeMs: 50.0,
-                galvoFov: GalvoFov, galvoFirst: true);
+                galvoFov: GalvoFov, galvoFirst: true,
+                jumpSpeedPlatform: JumpSpeedPlatform, jumpSpeedGalvo: JumpSpeedGalvo,
+                sampleRate: SampleRate);
             PlanInfo += $"\n\n[钻孔链路] 规划完成：{DrillingTrajectory.Moves.Count:N0} 个孔位移动";
             DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 已规划路径";
             
@@ -450,6 +475,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 DrillingPattern);
             CurrentAnimationFrame = 0;
             PlanInfo += $"\n环切动画：{TrepanAnimationFrames.Count} 帧，预计时长 {TrepanAnimationDuration:F0} ms";
+            
+            // ④ 钻孔轨迹采样和仿真关联（关键！确保激光控制正确）
+            DecomposeDrilling();
         }
     }
 
