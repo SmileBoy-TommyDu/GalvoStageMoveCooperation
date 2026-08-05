@@ -19,3 +19,5 @@
 /tools/GalvoFirstBench/obj
 /tools/MixedBench/bin/Debug/net6.0
 /tools/MixedBench/obj
+/tools/TrepanBench/bin/Debug/net6.0
+/tools/TrepanBench/obj
