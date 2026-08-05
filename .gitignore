@@ -21,3 +21,7 @@
 /tools/MixedBench/obj
 /tools/TrepanBench/bin/Debug/net6.0
 /tools/TrepanBench/obj
+/tools/QualityBench/bin/Debug/net6.0
+/tools/QualityBench/obj
+/tools/QualityDB/bin/Debug/net6.0
+/tools/QualityDB/obj
