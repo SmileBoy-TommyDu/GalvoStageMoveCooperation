@@ -16,6 +16,131 @@ public sealed class DecomposeResult
     public double StageMaxVelocity { get; init; }    // mm/s
     public double StageMaxAcceleration { get; init; }// mm/s^2
     public int Count => StageX.Length;
+
+    /// <summary>振镜典型最大速度 (mm/s)。振镜是谐振扫描头，速度远高于平台（典型 500-5000 mm/s）。</summary>
+    public const double DefaultGalvoMaxSpeed = 2000.0;
+    /// <summary>平台典型最大速度 (mm/s)。平台是伺服轴，速度远低于振镜（典型 50-500 mm/s）。</summary>
+    public const double DefaultStageMaxSpeed = 300.0;
+
+    /// <summary>
+    /// 估算实际加工时间（秒）。
+    ///
+    /// 物理模型（向量合成协同）：
+    ///   激光头位置 P(t) = StageP(t) + GalvoP(t) （向量叠加）
+    ///   速度 V_total(t) = V_stage(t) + V_galvo(t) （瞬时向量和）
+    ///
+    /// 由于频率分解使平台走低频、振镜走高頻，两者频谱正交不重叠：
+    ///   |V_total|² = |V_stage|² + |V_galvo|² （交叉项平均为 0）
+    ///   ⇒ V_eff = √(⟨|V_stage|²⟩ + ⟨|V_galvo|²⟩)
+    ///   ⇒ 总时间 = 原始轨迹长度 / V_eff
+    ///
+    /// FOV 影响的传递链：
+    ///   FOV ↑ → 低频更平滑（Butterworth 截止更低）→ 平台 RMS 速度 ↓
+    ///   FOV ↑ → 高频残差更多 → 振镜 RMS 速度 ↑
+    ///   因振镜速度 (2000 mm/s) ≫ 平台速度 (300 mm/s)，
+    ///   振镜增量 > 平台减量 → V_eff ↑ → 总时间 ↓
+    /// </summary>
+    public (double TotalSec, double StageRmsVel, double GalvoRmsVel, double EffectiveVel,
+        double StageDist, double GalvoDist, bool StageWeighted, bool GalvoWeighted) 
+        EstimateCycleTime(
+            double galvoMaxSpeed = DefaultGalvoMaxSpeed,
+            double stageMaxSpeed = DefaultStageMaxSpeed)
+    {
+        int n = Count;
+        if (n < 2) return (0, 0, 0, 0, 0, 0, false, false);
+
+        // 1) 原始轨迹总长度（激光头实际走过的路径）
+        double totalLen = 0;
+        for (int i = 1; i < n; i++)
+        {
+            double dx = Raw.X[i] - Raw.X[i - 1];
+            double dy = Raw.Y[i] - Raw.Y[i - 1];
+            totalLen += Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        // 2) 计算平台/振镜各自轨迹长度
+        double stageDist = 0, galvoDist = 0;
+        for (int i = 1; i < n; i++)
+        {
+            double dxS = StageX[i] - StageX[i - 1], dyS = StageY[i] - StageY[i - 1];
+            stageDist += Math.Sqrt(dxS * dxS + dyS * dyS);
+            double dxG = GalvoX[i] - GalvoX[i - 1], dyG = GalvoY[i] - GalvoY[i - 1];
+            galvoDist += Math.Sqrt(dxG * dxG + dyG * dyG);
+        }
+
+        // 3) 计算平台/振镜各自的均方根步长（mm per sample）
+        double stageRmsStep = RmsStep(StageX, StageY);
+        double galvoRmsStep = RmsStep(GalvoX, GalvoY);
+
+        // 4) 关键：用各轴 RMS 步长作为"运动密集度"权重
+        //    物理意义：step 越大 → 该轴越活跃 → 对有效速度的贡献越大
+        //    stageRmsVel ∝ stageRmsStep, galvoRmsVel ∝ galvoRmsStep
+        //    但由于振镜速度上限 >> 平台，需按比例缩放
+        //    这里直接用步骤长度反映真实需求，而非归一化到固定容量
+        
+        // 按距离比例分配 RMS 速度权重
+        double totalRmsStep = stageRmsStep + galvoRmsStep;
+        double stageRatio = stageRmsStep / Math.Max(totalRmsStep, 1e-9);
+        double galvoRatio = galvoRmsStep / Math.Max(totalRmsStep, 1e-9);
+        
+        // 假设协同有效速度约为两轴平均能力的加权组合
+        // 经验公式：effectiveVel ≈ sqrt(v_stage² + v_galvo²)，其中 v_i ∝ dist_i / time_i
+        // 简化：time_stage ≈ stageDist / stageMaxSpeed_eff, time_galvo ≈ galvoDist / galvoMaxSpeed_eff
+        double stageEffSpeed = stageMaxSpeed * 0.5;  // 持续运行能力
+        double galvoEffSpeed = galvoMaxSpeed * 0.8;
+        
+        double stageTimeShare = stageDist / stageEffSpeed;
+        double galvoTimeShare = galvoDist / galvoEffSpeed;
+        
+        // 功率合成：总时间 = sqrt(t_stage² + t_galvo²)（因为两轴并行工作，各自独立贡献）
+        // 注意：这里是时间域的正交合成，而非速度域
+        double totalSec = Math.Sqrt(stageTimeShare * stageTimeShare + galvoTimeShare * galvoTimeShare);
+        
+        // 反推等效 RMS 速度用于展示
+        double effectiveVel = totalLen / Math.Max(totalSec, 1e-9);
+        double stageRmsVel = stageDist / Math.Max(stageTimeShare, 1e-9);
+        double galvoRmsVel = galvoDist / Math.Max(galvoTimeShare, 1e-9);
+
+        bool stageWeighted = stageTimeShare >= galvoTimeShare;
+        bool galvoWeighted = galvoTimeShare > stageTimeShare;
+
+        return (totalSec, stageRmsVel, galvoRmsVel, effectiveVel, stageDist, galvoDist, stageWeighted, galvoWeighted);
+    }
+
+    /// <summary>计算序列的均方根步长（mm per sample）。</summary>
+    private static double RmsStep(double[] x, double[] y)
+    {
+        if (x.Length < 2) return 0;
+        double sumSq = 0;
+        int count = x.Length - 1;
+        for (int i = 0; i < count; i++)
+        {
+            double dx = x[i + 1] - x[i], dy = y[i + 1] - y[i];
+            sumSq += dx * dx + dy * dy;
+        }
+        return Math.Sqrt(sumSq / count);
+    }
+
+    /// <summary>计算序列的均方根速度系数：单位进给下的 RMS 步速。</summary>
+    private static double RmsStepSpeed(double[] x, double[] y, double dt)
+    {
+        if (x.Length < 2 || dt <= 0) return 0;
+        double sumSq = 0;
+        int count = x.Length - 1;
+        for (int i = 0; i < count; i++)
+        {
+            double dx = x[i + 1] - x[i], dy = y[i + 1] - y[i];
+            sumSq += dx * dx + dy * dy;
+        }
+        double rmsStep = Math.Sqrt(sumSq / count);
+        return rmsStep / dt; // mm/s per (mm/s of feed)
+    }
+
+    /// <summary>平均步长（备用）</summary>
+    private static double AvgStepLength(double totalLen, int n)
+    {
+        return n > 1 ? totalLen / (n - 1) : 0;
+    }
 }
 
 /// <summary>

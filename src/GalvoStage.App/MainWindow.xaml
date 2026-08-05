@@ -232,6 +232,14 @@
                                             Style="{StaticResource RoundButton}" Background="#B85A1F"
                                             ToolTipService.ToolTip="同时触发折线链路（频域分解）与钻孔链路（振镜优先聚类），双模式分离加工"/>
                                 </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                    <Button x:Name="BtnExportLaserGCode" Content="导出激光钻孔 G 代码" Click="OnExportLaserGCodeClick"
+                                            Style="{StaticResource RoundButton}" Background="#1F7A1F"
+                                            ToolTipService.ToolTip="使用环切工艺参数（按孔径分档）生成激光钻孔专用 G 代码"/>
+                                    <Button x:Name="BtnConfigTrepanParams" Content="配置工艺参数" Click="OnConfigTrepanParamsClick"
+                                            Style="{StaticResource RoundButton}" Background="#7A1F7A"
+                                            ToolTipService.ToolTip="打开工艺参数配置对话框，自定义各档位的激光功率、圈数、进给等参数"/>
+                                </StackPanel>
                                 <TextBlock Text="{Binding PlanInfo}" Style="{StaticResource InfoText}" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>

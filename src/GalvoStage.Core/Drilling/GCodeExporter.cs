@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using GalvoStage.Core.Geometry.Drilling;
 
 namespace GalvoStage.Core.Drilling;
 
@@ -85,6 +86,85 @@ public static class GCodeExporter
             w.WriteLine("M5");
         }
 
+        w.WriteLine();
+        w.WriteLine($"G0 Z{opt.SafeZ.ToString("F3", ci)}");
+        w.WriteLine("M30");
+        w.WriteLine("%");
+        return total;
+    }
+    
+    /// <summary>
+    /// 激光钻孔专用导出器：使用环切工艺参数（TrepanParams）生成 G 代码
+    /// 每个孔按孔径分档设置的功率、圈数、进给速度进行环切加工
+    /// </summary>
+    public static int ExportLaserDrilling(DrillPlanner.DrillingTrajectory trajectory, string path, 
+        Options? options = null)
+    {
+        var opt = options ?? new Options();
+        var ci = CultureInfo.InvariantCulture;
+        var moves = trajectory.Moves;
+        
+        int total = 0;
+        using var w = new StreamWriter(path, false, System.Text.Encoding.ASCII, 1 << 20);
+        
+        w.WriteLine("%");
+        w.WriteLine($"{opt.ProgramNumber} (Laser Drilling - {moves.Count} holes)");
+        w.WriteLine("G21 G90 G94 (mm / absolute / feed per min)");
+        w.WriteLine("G17");
+        w.WriteLine("M10 P0 (laser off)");
+        w.WriteLine($"G0 Z{opt.SafeZ.ToString("F3", ci)}");
+        
+        foreach (var m in moves)
+        {
+            string x = m.Position.X.ToString("F4", ci);
+            string y = m.Position.Y.ToString("F4", ci);
+            
+            // 获取该孔的工艺参数
+            var pp = m.ProcessParams ?? TrepanParams.MediumHole;
+            
+            w.WriteLine();
+            w.WriteLine($"(HOLE {total + 1}: D={m.Diameter:F3}mm, Power={pp.Power}W, Rings={pp.OffsetRings})");
+            w.WriteLine($"G0 X{x} Y{y}");
+            
+            // 设置激光功率和进给
+            w.WriteLine($"M10 P{pp.Power.ToString("F0", ci)}");
+            w.WriteLine($"G1 F{pp.FeedRate.ToString("F0", ci)}");
+            
+            // 环切加工：从中心向外扩展
+            double radius = m.Diameter > 0 ? m.Diameter / 2.0 : 0.5; // 默认 0.5mm
+            for (int ring = 0; ring < pp.OffsetRings; ring++)
+            {
+                double ringRadius = radius * (ring + 1) / pp.OffsetRings;
+                int segments = Math.Max(12, (int)(2 * Math.PI * ringRadius / 0.1)); // 每 0.1mm 一段
+                
+                w.WriteLine($"(RING {ring + 1}: R={ringRadius:F3}mm)");
+                for (int seg = 0; seg <= segments; seg++)
+                {
+                    double angle = 2 * Math.PI * seg / segments;
+                    double cx = m.Position.X + ringRadius * Math.Cos(angle);
+                    double cy = m.Position.Y + ringRadius * Math.Sin(angle);
+                    w.WriteLine($"X{cx.ToString("F4", ci)} Y{cy.ToString("F4", ci)}");
+                }
+                
+                // 冷却间隔（大孔需要）
+                if (pp.CoolDownInterval > 0 && ring < pp.OffsetRings - 1)
+                {
+                    w.WriteLine($"G4 P{pp.CoolDownInterval.ToString("F0", ci)} (cool down)");
+                }
+            }
+            
+            // 持留时间
+            if (pp.HoldTime > 0)
+            {
+                w.WriteLine($"G4 P{pp.HoldTime.ToString("F0", ci)} (hold)");
+            }
+            
+            // 关闭激光
+            w.WriteLine("M10 P0");
+            
+            total++;
+        }
+        
         w.WriteLine();
         w.WriteLine($"G0 Z{opt.SafeZ.ToString("F3", ci)}");
         w.WriteLine("M30");

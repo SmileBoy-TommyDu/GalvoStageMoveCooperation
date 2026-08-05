@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using GalvoStage.Core.Geometry;
+using GalvoStage.Core.Geometry.Drilling;
 
 namespace GalvoStage.Core.Drilling;
 
@@ -19,6 +20,9 @@ public static class DrillPlanner
         public double DwellTimeMs; // 停留时间 (ms)
         public double Diameter;    // 孔径 (mm)，0 表示未知
         public string Layer;       // 来源图层
+        
+        /// <summary>工艺参数（按孔径分档配置）</summary>
+        public TrepanParams ProcessParams { get; set; }
         
         public override string ToString() => $"({Position.X:F3},{Position.Y:F3})";
     }
@@ -61,7 +65,8 @@ public static class DrillPlanner
                 IsDrilling = true,
                 DwellTimeMs = dwellTimeMs,
                 Diameter = h.Diameter,
-                Layer = h.Layer
+                Layer = h.Layer,
+                ProcessParams = h.ProcessParams
             });
         }
 

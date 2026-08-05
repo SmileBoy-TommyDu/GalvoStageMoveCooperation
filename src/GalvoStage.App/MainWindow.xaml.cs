@@ -251,6 +251,55 @@ public partial class MainWindow : Window
         finally { Mouse.OverrideCursor = null; }
         InvalidateCanvases();
     }
+    
+    /// <summary>导出激光钻孔 G 代码（使用环切工艺参数）</summary>
+    private void OnExportLaserGCodeClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm.DrillingTrajectory == null || _vm.DrillingTrajectory.Moves.Count == 0)
+        {
+            MessageBox.Show(this, "请先执行双模式分解完成钻孔路径规划。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "G 代码文件 (*.nc;*.gcode)|*.nc;*.gcode|所有文件 (*.*)|*.*",
+            Title = "导出激光钻孔 G 代码（环切工艺）",
+            FileName = "laser_drilling.nc"
+        };
+        
+        if (dlg.ShowDialog() == true)
+        {
+            try
+            {
+                int count = GalvoStage.Core.Drilling.GCodeExporter.ExportLaserDrilling(
+                    _vm.DrillingTrajectory, dlg.FileName);
+                MessageBox.Show(this, 
+                    $"已成功导出 {count} 个孔的激光钻孔 G 代码\n文件：{dlg.FileName}", 
+                    "导出成功", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"导出失败：{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+    
+    /// <summary>打开工艺参数配置对话框</summary>
+    private void OnConfigTrepanParamsClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new TrepanParamsDialog(
+            GalvoStage.Core.Drilling.TrepanParams.MediumHole, 
+            "中孔 (1-3mm)");
+        
+        if (dialog.ShowDialog() == true)
+        {
+            var result = dialog.GetResult();
+            MessageBox.Show(this, 
+                $"工艺参数已更新：\n{result}", 
+                "配置成功", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
 
     private void OnStartPauseClick(object sender, RoutedEventArgs e)
     {

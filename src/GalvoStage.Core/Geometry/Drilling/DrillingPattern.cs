@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using GalvoStage.Core.Drilling;
 
 namespace GalvoStage.Core.Geometry.Drilling;
 
@@ -16,16 +17,30 @@ public sealed class DrillingPattern
         public string Layer;        // DXF 图层
         public int OriginalIndex;   // 原始索引（用于调试）
         
+        /// <summary>工艺参数（按孔径分档配置）</summary>
+        public TrepanParams ProcessParams { get; set; }
+        
         /// <summary>构造器：带坐标和图层信息</summary>
         public Hole(double x, double y, string layer, int index)
         {
             X = x; Y = y; Diameter = 0; Layer = layer; OriginalIndex = index;
+            ProcessParams = null;
         }
 
         /// <summary>构造器：带孔径</summary>
         public Hole(double x, double y, double diameter, string layer, int index)
         {
             X = x; Y = y; Diameter = diameter; Layer = layer; OriginalIndex = index;
+            ProcessParams = null;
+        }
+        
+        /// <summary>根据孔径自动设置工艺参数</summary>
+        public void RecomputeProcessParams()
+        {
+            if (Diameter > 0)
+                ProcessParams = TrepanParams.CreateForDiameter(Diameter);
+            else
+                ProcessParams = TrepanParams.MediumHole; // 默认中孔参数
         }
     }
 

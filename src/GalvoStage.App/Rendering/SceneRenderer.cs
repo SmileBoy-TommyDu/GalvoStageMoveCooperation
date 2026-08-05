@@ -574,7 +574,7 @@ public static class SceneRenderer
         var dedup = _dedupCells;
 
         const float MinCircleRadiusPx = 1.5f;   // 小于此屏幕半径的孔退化为点
-        var circles = new List<(SKPoint c, float r)>(1024);
+        var circles = new List<(SKPoint c, float r, SKColor color)>(1024);
         var pts = new List<SKPoint>(Math.Min(n, 200_000));
         bool circleCapped = false;
         for (int i = 0; i < n; i++)
@@ -587,9 +587,22 @@ public static class SceneRenderer
             float sx = (float)(offX + h.X * scale);
             float sy = (float)(offY - h.Y * scale);
             float rPx = (float)(rW * scale);              // 屏幕半径 (px)
+            
+            // 功率梯度颜色映射（根据 ProcessParams.Power）
+            SKColor holeColor = DrillPointColor; // 默认颜色
+            if (h.ProcessParams != null)
+            {
+                double power = h.ProcessParams.Power;
+                if (power <= 5000) holeColor = SKColors.Cyan;         // 微孔：青色
+                else if (power <= 8000) holeColor = SKColors.Lime;    // 小孔：绿色
+                else if (power <= 12000) holeColor = SKColors.Yellow; // 中孔：黄色
+                else if (power <= 15000) holeColor = SKColors.Orange; // 大孔：橙色
+                else holeColor = SKColors.Red;                        // 特大孔：红色
+            }
+            
             if (!circleCapped && rPx >= MinCircleRadiusPx)
             {
-                circles.Add((new SKPoint(sx, sy), rPx));
+                circles.Add((new SKPoint(sx, sy), rPx, holeColor));
                 if (circles.Count > 60_000) circleCapped = true;   // 极端情况下停止收集，防卡顿
             }
             else
@@ -609,15 +622,17 @@ public static class SceneRenderer
             paint.Color = DrillPointColor;
             FlushPoints(canvas, paint, pts.ToArray(), pts.Count);
         }
-        // 可见孔：按真实孔径画圆轮廓
+        // 可见孔：按真实孔径画圆轮廓（带功率梯度颜色）
         if (circles.Count > 0)
         {
-            paint.Color = DrillPointColor;
             paint.Style = SKPaintStyle.Stroke;
             paint.StrokeWidth = 1.2f;
             paint.IsAntialias = true;
-            foreach (var (c, r) in circles)
+            foreach (var (c, r, color) in circles)
+            {
+                paint.Color = color;
                 canvas.DrawCircle(c, r, paint);
+            }
         }
         (paint.Color, paint.Style, paint.StrokeWidth, paint.IsAntialias) = saved;
     }

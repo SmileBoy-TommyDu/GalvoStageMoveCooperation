@@ -225,14 +225,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RebuildSimulator();
 
         string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
+        var (totalSec, stageRmsVel, galvoRmsVel, effectiveVel, stageDist, galvoDist, stageWeighted, galvoWeighted) = Plan.EstimateCycleTime();
+        string contributor = stageWeighted ? "平台为主" : "振镜为主";
         PlanInfo =
             note +
             $"加工轮廓：{Polylines.Count:N0} 条（全量，无丢弃）\n" +
-            $"采样点数：{Plan.Count}   加工时长：{Plan.Raw.Duration:F1} s\n" +
+            $"采样点数：{Plan.Count}   采样时长：{Plan.Raw.Duration:F1} s\n" +
             $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
             $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
-            $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s\n" +
-            $"平台峰值加速度：{Plan.StageMaxAcceleration:F0} mm/s²";
+            $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s   峰值加速度：{Plan.StageMaxAcceleration:F0} mm/s²\n" +
+            $"\n" +
+            $"【实际加工时间估算（向量合成协同）】\n" +
+            $"  估算周期：{totalSec:F2} s   有效速度：{effectiveVel:F1} mm/s   （{contributor}）\n" +
+            $"  平台：低频行程 {stageDist:F0} mm / RMS 速度 {stageRmsVel:F1} mm/s\n" +
+            $"  振镜：高频行程 {galvoDist:F0} mm / RMS 速度 {galvoRmsVel:F1} mm/s\n" +
+            $"  协同：有效速度 = √(v_平台_RMS² + v_振镜_RMS²)\n" +
+            $"  说明：FOV 越大 → 振镜承担越多高频分量 → v_振镜_RMS ↑ → 有效速度 ↑ → 总时间 ↓";
         SceneChanged?.Invoke();
     }
 
@@ -399,7 +407,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // 钻孔链路
         if (DrillingPattern != null && DrillingPattern.Holes.Count > 0)
         {
-            // 钻孔路径规划（振镜优先）
+            // ① 按孔径分档设置工艺参数
+            var holes = DrillingPattern.Holes;
+            for (int i = 0; i < holes.Count; i++)
+            {
+                var h = holes[i];
+                h.RecomputeProcessParams();
+                holes[i] = h;
+            }
+            
+            // ② 钻孔路径规划（振镜优先）
             DrillingTrajectory = DrillPlanner.Plan(DrillingPattern, dwellTimeMs: 50.0,
                 galvoFov: GalvoFov, galvoFirst: true);
             PlanInfo += $"\n\n[钻孔链路] 规划完成：{DrillingTrajectory.Moves.Count:N0} 个孔位移动";

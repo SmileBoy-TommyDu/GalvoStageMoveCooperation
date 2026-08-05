@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SmokeTest.Drill", "tools\Sm
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GalvoFirstBench", "tools\GalvoFirstBench\GalvoFirstBench.csproj", "{8A5D65E5-9B32-4A0A-9C0E-29A3240CBCEB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrepanBench", "tools\TrepanBench\TrepanBench.csproj", "{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -87,6 +89,18 @@ Global
 		{8A5D65E5-9B32-4A0A-9C0E-29A3240CBCEB}.Release|x64.Build.0 = Release|Any CPU
 		{8A5D65E5-9B32-4A0A-9C0E-29A3240CBCEB}.Release|x86.ActiveCfg = Release|Any CPU
 		{8A5D65E5-9B32-4A0A-9C0E-29A3240CBCEB}.Release|x86.Build.0 = Release|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Debug|x64.Build.0 = Debug|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Debug|x86.Build.0 = Debug|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Release|x64.ActiveCfg = Release|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Release|x64.Build.0 = Release|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Release|x86.ActiveCfg = Release|Any CPU
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -96,6 +110,7 @@ Global
 		{A77B0B46-464F-4B96-BE18-DF228D9E4495} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{2A18C809-F824-4D1A-8AC8-92C9F1AD8AA2} = {07C2787E-EAC7-C090-1BA3-A61EC2A24D84}
 		{8A5D65E5-9B32-4A0A-9C0E-29A3240CBCEB} = {07C2787E-EAC7-C090-1BA3-A61EC2A24D84}
+		{CD66E6B0-5D44-4767-B280-3DAF99A2FF79} = {07C2787E-EAC7-C090-1BA3-A61EC2A24D84}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {3ACAF42A-8F25-4779-BC9B-4AE282DB5380}
