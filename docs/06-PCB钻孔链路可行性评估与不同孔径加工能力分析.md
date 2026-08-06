@@ -19,10 +19,10 @@
 | 激光环切轨迹 | ✅ 已支持 | `DecomposeDrilling` 按孔径画圆环切，不同孔径产生不同轨迹（本次改造） |
 | 超大文件全量加工 | ✅ 已支持 | 规划改为全量 Z-order 排序，所有孔进入 `DrillingTrajectory`/G 代码；抽样仅用于仿真预览（本次改造） |
 | 超幅面孔 / 单孔跨场 | ✅ 天然支持 | 大圆由平台承载（f=v/2πr 低、a=v²/r 小），连续协同无拼接缝；仅受平台行程/加速度限制（见 §七） |
-| 按孔径分组排序 | ⛔ 非必需 | **激光无换刀**，主导成本是孔间跳转空程；纯空间 Z-order 已最优，强行分组反而增大空程（负优化） |
+| 按孔径分组排序 | 🟢 可选 | 默认 `TimeOptimal`（纯空间 Z-order + 簇内 2-opt）时间最短；另提供 `QualityOptimal` 按孔径分组作为**可选工艺优先策略**（见 §三.2） |
 | 差异化工艺参数 | 🟠 待完善 | 环切速度/圈数与孔径解耦程度有限，尚无按孔径的功率/进给表 |
 
-**总体判断**：激光钻孔范式下，孔径已能通过环切轨迹真实体现，超大文件也不再静默丢孔（全量进入加工，抽样只影响预览）。**"按孔径分组排序"是机械钻假设的遗留项，激光范式下非必需甚至负优化，已排除**；唯一剩余关键短板是**按孔径的差异化工艺参数（🟠）**。
+**总体判断**：激光钻孔范式下，孔径已能通过环切轨迹真实体现，超大文件也不再静默丢孔（全量进入加工，抽样只影响预览）。**排序默认走 `TimeOptimal`（纯空间最短，激光最优）；`DrillingStrategy.QualityOptimal` 按孔径分组作为可选策略供有工艺需求时选用，二者不冲突**；唯一剩余关键短板是**按孔径的差异化工艺参数（🟠）**。
 
 
 ---
@@ -35,7 +35,7 @@ DXF 文件
   ▼  → DrillingDxfParser.ParseFile（扫描 CIRCLE，radius×2 → Diameter）
 DrillingPattern（Holes[]，每孔含 X/Y/Diameter/Layer）
   │  PlanDrillingPathAsync（全量规划，无丢弃）
-  ▼  → DrillPlanner.Plan（Z-order 莫顿码 / 网格最近邻，纯空间最短路径）
+  ▼  → DrillPlanner.Plan（振镜优先聚类：2·FOV 网格 → 簇质心莫顿码 → 簇内最近邻 + 2-opt；默认 TimeOptimal，可选 QualityOptimal 按孔径分组）
 DrillingTrajectory（HoleMove[]，含 Position/Diameter/DwellTimeMs）
   ├─ DecomposeDrilling → SampleUniform(仅预览子集) → 按孔径环切采样 → FrequencyDecomposer → LinkageSimulator（仿真）
   └─ ExportGCode → GCodeExporter.Export（机械钻备用：按孔径分组换刀 + G81）→ .nc
@@ -68,18 +68,18 @@ DrillingTrajectory（HoleMove[]，含 Position/Diameter/DwellTimeMs）
 现改为**全量规划**：`DrillPlanner.Plan(pattern)` 直接对所有孔做 Z-order（莫顿码）排序，复杂度 O(n log n)，百万级孔亦可承受，全部孔进入 `DrillingTrajectory` → G 代码导出/加工无一丢弃。
 原 `SampleHoles` 已重构为通用的 `SampleUniform<T>`，**仅供仿真预览子集使用**（见 §三.3），彻底与加工数据解耦——对齐激光链路"抽样只影响估参/预览，不影响加工指令"的两阶段原则。
 
-⛔ **原"问题②：规划不按孔径分组"——激光范式下已排除，纯空间排序即最优。**
-该建议源自**机械钻假设**：机械钻每种孔径要物理换刀（`M6`，秒级），故需分组把同径孔排在一起以摊薄换刀次数。
+🟢 **原"问题②：规划不按孔径分组"——默认纯空间排序即最优；同时提供可选的按孔径分组策略。**
+纯空间排序最优的结论源自激光与机械钻的本质差异：机械钻每种孔径要物理换刀（`M6`，秒级），故需分组把同径孔排在一起以摊薄换刀次数；
 但激光钻**没有钻头**，孔径由环切半径在软件里决定，换孔径只是改激光参数（μs～ms 指令级），**主导成本变成孔间跳转空程（jump）**：
 
 | | 机械钻 | 激光钻 |
 |---|---|---|
 | 换孔径代价 | 物理换刀，秒级 | 改参数/环切半径，指令级 |
 | 主导成本 | 换刀次数 | 孔间跳转空程 |
-| 最优排序 | 先分组、组内再排 | **纯空间最短路径（Z-order / 最近邻）** |
+| 默认最优排序 | 先分组、组内再排 | **纯空间最短路径（Z-order + 簇内 2-opt）** |
 
-因此对激光而言，强行按孔径分组会把**空间上分散**的同径孔硬凑到一起 → 振镜来回长途奔袭、**空程反而暴增，属负优化**。当前 `Plan` 的纯空间 Z-order 排序即为激光最优，无需改动。
-> 仅当不同孔径对应不同激光配方、且配方切换有不可忽略的稳定时间时，才考虑**带权代价排序** `cost = 跳转空程 + λ·参数切换`（λ 随切换成本调节），而非无脑聚类；本项目参数切换极廉价，λ→0 退化为纯空间排序。
+因此对激光而言，默认的 `DrillingStrategy.TimeOptimal`（纯空间 Z-order + 簇内 2-opt）即为最优；强行按孔径分组会把**空间上分散**的同径孔硬凑到一起→ 振镜来回长途奔袭、空程增大，因此它**不作为默认**。
+> 但代码仍提供 `DrillingStrategy.QualityOptimal` 作为**可选工艺优先策略**：按孔径（`Math.Round(Diameter,3)`，μm 级）升序分组，保证同径孔连续加工、工艺参数切换最少；仅当不同孔径对应不同激光配方、且配方切换有不可忽略的稳定时间时才推荐启用（以工艺一致性换取部分空程）。由 UI `DrillQualityFirst` 开关选择，默认关（即 TimeOptimal）。
 
 ### 3. 分解/仿真 —— `DecomposeDrilling`
 
@@ -125,7 +125,7 @@ r = Diameter/2
 | ✅ | ~~>10 万孔按索引抽样静默丢孔~~ 已改为全量规划，抽样仅用于仿真预览 | `PlanDrillingPathAsync` / `SampleUniform` |
 | ✅ | ~~分解/仿真运动不使用孔径~~ 已改为按孔径环切 | `MainViewModel.DecomposeDrilling` |
 | 🟠 | 环切工艺（进给/圈数/功率）未按孔径分档 | `MainViewModel.DecomposeDrilling` |
-| ⛔ | ~~规划不按孔径分组~~ 激光范式下非必需/负优化，纯空间排序即最优（见 §三.2） | `DrillPlanner.Plan` |
+| 🟢 | ~~规划不按孔径分组~~ 默认 `TimeOptimal` 纯空间排序即最优；另提供可选 `QualityOptimal` 按孔径分组（见 §三.2） | `DrillPlanner.Plan` |
 | 🟠 | 机械 G 代码各孔径共用同一工艺参数（如启用机械钻备用） | `GCodeExporter.Options` |
 | 🟡 | 解析仅支持 CIRCLE；单位/编码/行窗口假定 | `DrillingDxfParser` |
 | 🟡 | `DwellTimeMs`、`TotalDurationMs`（50ms/孔）不随孔径/实际调整 | `Plan` / `DecomposeDrilling` |
@@ -136,7 +136,7 @@ r = Diameter/2
 
 1. ~~**先修丢孔**~~ ✅ **已完成**：`PlanDrillingPathAsync` 改为全量 Z-order 规划，所有孔进入 `DrillingTrajectory`/G 代码导出；`SampleUniform` 仅用于仿真预览子集。"规划/导出"与"仿真"已解耦，对齐激光两阶段方案。
 2. ~~**明确工艺范式**~~ ✅ **已确认为激光钻**：按孔径生成 trepanning 圆环轨迹，孔径已进入运动指令。
-3. ~~**规划按孔径分组**~~ ⛔ **激光范式下已排除**：激光无换刀，主导成本是孔间跳转空程，纯空间 Z-order 排序即最优，强行分组反而增大空程（负优化）。仅当激光配方切换成本显著时才用带权代价排序（见 §三.2），当前无需。
+3. ~~**规划按孔径分组**~~ 🟢 **默认不分组（最优），已提供可选分组策略**：默认 `TimeOptimal` 纯空间 Z-order + 簇内 2-opt 时间最短；同时提供 `QualityOptimal` 按孔径分组作为可选工艺优先策略（见 §三.2），供激光配方切换成本显著时选用。
 4. **孔径差异化工艺（🟠 当前最高）**：环切进给/圈数/激光功率升级为"按孔径的参数表"，不同孔径各用其参数（大孔多层螺旋、小孔限圈防过烧）。
 5. **解析健壮性**：支持 ARC/INSERT/POINT、`$INSUNITS` 单位换算、编码探测。
 

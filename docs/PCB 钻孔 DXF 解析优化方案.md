@@ -235,7 +235,10 @@ public async Task ImportDrillingDxf(string path)
         var pattern = DrillingDxfParser.ParseFile(path);
         PlanningInfo = $"钻孔点数={pattern.Holes.Count}\n图层分布：{FormatLayers(pattern)}\n包围盒：{pattern.Bounds?.MinX:F2}×{pattern.Bounds?.MinY:F2} ~ {pattern.Bounds?.MaxX:F2}×{pattern.Bounds?.MaxY:F2} mm";
 
-        var trajectory = DrillPlanner.Plan(pattern, feedSpeed: 80, rapidSpeed: 300, dwellTimeMs: 50);
+        var trajectory = DrillPlanner.Plan(pattern, dwellTimeMs: 50.0,
+            galvoFov: GalvoFov, galvoFirst: true,
+            jumpSpeedPlatform: JumpSpeedPlatform, jumpSpeedGalvo: JumpSpeedGalvo,
+            sampleRate: SampleRate);
         DrillingTrajectory = trajectory;
         
         RenderDrillingPattern(pattern);
@@ -288,9 +291,34 @@ public async Task ImportDrillingDxf(string path)
 
 | 风险 | 影响 | 对策 |
 |------|------|------|
-| DXF 包含混合内容（孔 + 轮廓） | 解析混淆 | 提供用户选择："钻孔模式"/"轮廓模式"开关 |
+| DXF 包含混合内容（孔 + 轮廓） | 解析混淆 | 已落地 `DxfParser.ParseFileMixed`：一次解析同时产出折线与钻孔，并用 `FromCircle` 标记去重（见下节） |
 | 超大文件（百万孔）加载慢 | UX 卡顿 | 异步解析 + 进度条 |
 | 孔径信息缺失 | 工艺不完整 | 按图层映射预设孔径 |
+
+---
+
+## 混合解析与 FromCircle 去重（已实现）
+
+针对"同一 DXF 既有轮廓折线又有圆孔"的常见场景，`DxfParser` 提供了 `ParseFileMixed`，避免同一个圆被折线链路与钻孔链路重复加工：
+
+```csharp
+// src/GalvoStage.Core/Dxf/DxfParser.cs
+public sealed class MixedParseResult
+{
+    public List<PathPolyline> Polylines { get; }   // 折线（含由 CIRCLE 细分而来的闭合多段线）
+    public DrillingPattern DrillingHoles { get; }   // 圆孔点集
+    public int CircleCount { get; set; }            // 识别到的 CIRCLE 数量
+}
+
+public static MixedParseResult ParseFileMixed(string path);
+```
+
+**去重机制**：解析到 `CIRCLE` 实体时，`AddCircleMixed` 会**双写**——
+
+1. 生成一条闭合折线用于渲染/连续加工，并打上 `FromCircle = true` 标记；
+2. 同时向 `DrillingPattern` 追加一个圆孔（供钻孔链路环切）。
+
+在双模式分解（`MainViewModel.DecomposeBoth`）里，折线集合会用 `Polylines.Where(p => !p.FromCircle)` 过滤掉这些由圆细分而来的折线，圆孔统一交给钻孔链路环切，从而**避免同一个圆被加工两次**。`INSERT` 块引用也在混合解析中展开。
 
 ---
 

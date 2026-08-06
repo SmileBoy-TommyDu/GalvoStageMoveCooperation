@@ -4,15 +4,17 @@
 
 ### 1.1 原有算法缺陷
 
-**原 `PathSampler.Sample` 方法签名**：
+**早期 `PathSampler.Sample` 方法签名**：
 ```csharp
 public static SampledTrajectory Sample(
     IReadOnlyList<PathPolyline> polylines,
     double feedSpeed,      // 进给速度
-    double rapidSpeed,     // 快移速度
+    double rapidSpeed,     // 快移速度（单一值）
     double sampleRate,     // 采样频率
     double cornerAngleDeg = 150)  // 尖角保真阈值
 ```
+
+> 该早期签名已被替换。当前签名见 §2.1，快移速度已由 `jumpSpeedPlatform / jumpSpeedGalvo` 两个参数向量合成，不再是单一 `rapidSpeed`。
 
 **缺失的关键参数**：
 - ❌ `accel` - 加速度（影响加速段长度）
@@ -65,17 +67,22 @@ V_head(t) = V_stage(t) + V_galvo(t)
 
 ### 2.1 新增参数
 
-**改进后的 `PathSampler.Sample` 方法签名**：
+**当前的 `PathSampler.Sample` 方法签名**：
 ```csharp
 public static SampledTrajectory Sample(
     IReadOnlyList<PathPolyline> polylines,
-    double feedSpeed,          // 进给速度 (mm/s)
-    double rapidSpeed,         // 快移速度 (mm/s)
-    double sampleRate,         // 采样频率 (Hz)
-    double cornerAngleDeg = 150,  // 尖角保真阈值 (度)
-    double accel = 1000.0,     // 加速度 (mm/s²) ⭐新增
-    double cornerFactor = 0.5) // 拐角系数 (0-1) ⭐新增
+    double feedSpeed,              // 进给速度 (mm/s)
+    double jumpSpeedPlatform,      // 平台空移速度 (mm/s) ⭐
+    double jumpSpeedGalvo,         // 振镜空移速度 (mm/s) ⭐
+    double sampleRate,             // 采样频率 (Hz)
+    double cornerAngleDeg = 150,   // 尖角保真阈值 (度)
+    double accelPlatform = 1000.0, // 平台加速度 (mm/s²)
+    double accelGalvo = 5000.0,    // 振镜加速度 (mm/s²)
+    double cornerFactor = 0.5,     // 拐角系数 (0-1) ⭐已生效
+    double decelPlatform = 0)      // 平台减速度 (mm/s²)
 ```
+
+> 快移速度不再是单一入参，而是由两个空移速度向量合成：`rapidSpeed = min(√(jumpSpeedPlatform² + jumpSpeedGalvo²), 1000)`。`cornerFactor` 已在轮廓段采样中生效；`accelPlatform / accelGalvo / decelPlatform` 已进入签名，但 `Sample` 主流程当前仍走恒速插补（详见 §2.3 与文档 14）。
 
 ### 2.2 拐角系数集成
 
@@ -126,16 +133,13 @@ segmentSpeed = feedSpeed * (1.0 - cornerFactor);
 
 ---
 
-### 2.3 加速度参数（预留）
+### 2.3 加速度参数（已编写但未接入主流程）
 
-**当前状态**：`accel` 参数已添加到方法签名，但尚未在算法中使用
+**当前状态**：`accelPlatform / accelGalvo / decelPlatform` 已加入方法签名并从 UI 传入，但 `Sample` 主循环尚未消费它们——空程段与轮廓段都调用恒速的 `InterpolateSegment`。
 
-**未来计划**：
-1. 计算加速段长度：`s_accel = 0.5 * v² / a`
-2. 在轮廓起点和终点插入加速/减速段
-3. 动态调整采样步长以反映速度变化
+**已具备的代码**：`PathSampler` 中已实现 `CalculateAccelDecelDistances` 与 `InterpolateSegmentWithAccel`（三段式加减速采样），但目前**没有任何调用点**，等待后续接线（详见文档 14）。
 
-**示例计算**：
+**接线后的计算**：
 ```
 进给速度 = 100 mm/s
 加速度 = 1000 mm/s²
@@ -165,20 +169,23 @@ public void Decompose()
             // 子集采样
             var subset = PathSampler.Decimate(Polylines, PathSampler.MaxSampleContours);
             var subsetTraj = PathSampler.Sample(subset, 
-                FeedSpeed,      // UI 绑定
-                RapidSpeed,     // UI 绑定
-                SampleRate,     // UI 绑定
+                FeedSpeed,           // UI 绑定
+                JumpSpeedPlatform,   // UI 绑定 ⭐
+                JumpSpeedGalvo,      // UI 绑定 ⭐
+                SampleRate,          // UI 绑定
                 cornerAngleDeg: 150,
-                accel: AccelPlatform,      // UI 绑定 ⭐新增
-                cornerFactor: CornerFactor); // UI 绑定 ⭐新增
+                accelPlatform: AccelPlatform,  // UI 绑定
+                accelGalvo: AccelGalvo,        // UI 绑定
+                cornerFactor: CornerFactor);   // UI 绑定 ⭐已生效
             
             double cutoff = FrequencyDecomposer.DecomposeAuto(subsetTraj, GalvoFov).CutoffHz;
             
             // 全量采样
             var traj = PathSampler.Sample(Polylines, 
-                FeedSpeed, RapidSpeed, SampleRate,
+                FeedSpeed, JumpSpeedPlatform, JumpSpeedGalvo, SampleRate,
                 cornerAngleDeg: 150,
-                accel: AccelPlatform,
+                accelPlatform: AccelPlatform,
+                accelGalvo: AccelGalvo,
                 cornerFactor: CornerFactor);
             
             Plan = FrequencyDecomposer.Decompose(traj, cutoff, GalvoFov);
@@ -194,8 +201,8 @@ UI Slider
     ↓ (WPF Binding)
 MainViewModel.AccelPlatform / CornerFactor
     ↓ (方法参数)
-PathSampler.Sample(..., accel: AccelPlatform, cornerFactor: CornerFactor)
-    ↓ (内部计算)
+PathSampler.Sample(..., accelPlatform: AccelPlatform, accelGalvo: AccelGalvo, cornerFactor: CornerFactor)
+    ↓ (内部计算，cornerFactor 已生效；accel* 暂未消费)
 segmentSpeed = feedSpeed * (1 - cornerFactor)
     ↓
 InterpolateSegment(..., segmentSpeed * dt, ...)
@@ -306,11 +313,13 @@ feedSpeed = 100 mm/s
 
 **与 JumpSpeed 的关系**：
 ```
-当前实现：rapidSpeed = JumpSpeedPlatform（平台空移速度）
-
-未来改进：
+当前实现（已生效）：
 - rapidSpeed = √(JumpSpeedPlatform² + JumpSpeedGalvo²)
-- 区分平台和振镜的空移速度
+- 再钳制到上限：rapidSpeed = min(rapidSpeed, 1000)
+- 平台与振镜空移速度作为向量正交合成
+
+示例（JumpSpeedPlatform=500, JumpSpeedGalvo=2000）：
+- 合成 ≈ 2062 mm/s → 钳制后 = 1000 mm/s
 ```
 
 ---
@@ -417,15 +426,12 @@ accel = 2000 mm/s²
 
 ## 七、常见问题
 
-### Q1：为什么加速度参数未完全使用？
+### Q1：加速度参数目前用上了吗？
 
 **A**：
-- 当前已集成 `cornerFactor`，实现尖角速度衰减
-- `accel` 参数已添加到方法签名，但尚未在算法中完整实现
-- 未来计划：
-  - 计算加速段长度
-  - 动态调整采样步长
-  - 插入加速/减速段
+- 已集成 `cornerFactor`，尖角速度衰减**已生效**
+- `accelPlatform / accelGalvo / decelPlatform` 已加入签名并从 UI 传入，但 `Sample` 主流程**尚未消费**
+- 三段式加减速逻辑已写在 `InterpolateSegmentWithAccel` / `CalculateAccelDecelDistances` 中，但没有调用点，等待后续接线
 
 ### Q2：进给速度是平台速度还是振镜速度？
 
@@ -460,23 +466,23 @@ accel = 2000 mm/s²
 
 ### 8.1 核心改进
 
-1. ✅ **集成 cornerFactor**：实现尖角速度衰减
-2. ✅ **添加 accel 参数**：为未来加速度计算预留接口
-3. ✅ **参数传递**：UI → ViewModel → PathSampler 完整链路
+1. ✅ **集成 cornerFactor**：实现尖角速度衰减（已生效）
+2. ✅ **JumpSpeed 向量合成**：`rapidSpeed = min(√(平台²+振镜²), 1000)`，已参与空程采样
+3. ⚠️ **加速度参数**：已加入签名并实现 `InterpolateSegmentWithAccel`，但主流程尚未调用
+4. ✅ **参数传递**：UI → ViewModel → PathSampler 完整链路
 
 ### 8.2 物理意义
 
 - **feedSpeed**：激光头合成速度（平台 + 振镜）
-- **rapidSpeed**：空移速度
-- **accel**：加速度（预留）
-- **cornerFactor**：尖角速度衰减系数
+- **rapidSpeed**：由 jumpSpeedPlatform/jumpSpeedGalvo 向量合成的空移速度
+- **accel***：加速度（已入参，主流程未消费）
+- **cornerFactor**：尖角速度衰减系数（已生效）
 
 ### 8.3 下一步优化方向
 
-1. ✅ **完整实现加速度**：计算加速段长度，动态调整采样
-2. ✅ **集成 JumpSpeed**：区分平台和振镜的空移速度
-3. ✅ **自适应参数**：根据材料/厚度自动推荐参数
-4. ✅ **实时监控**：显示实际速度和加速度曲线
+1. ⬜ **接入加速度三段式采样**：把 `InterpolateSegmentWithAccel` 接进 `Sample` 主循环
+2. ⬜ **自适应参数**：根据材料/厚度自动推荐参数
+3. ⬜ **实时监控**：显示实际速度和加速度曲线
 
 ---
 

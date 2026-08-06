@@ -27,10 +27,19 @@ DXF → DxfParser → [PathSampler.Sample] → FrequencyDecomposer → 双轴联
 ```csharp
 public static SampledTrajectory Sample(
     IReadOnlyList<PathPolyline> polylines,
-    double feedSpeed,     // 进给速度 mm/s（激光开，走轮廓）
-    double rapidSpeed,    // 快移速度 mm/s（激光关，空程转移）
-    double sampleRate)    // 采样率 Hz
+    double feedSpeed,           // 进给速度 mm/s（激光开，走轮廓）
+    double jumpSpeedPlatform,   // 平台空移速度 mm/s（激光关）
+    double jumpSpeedGalvo,      // 振镜空移速度 mm/s（激光关）
+    double sampleRate,          // 采样率 Hz
+    double cornerAngleDeg = 150,   // 尖角保真阈值（内角 < 此值的顶点强制吸附）；≥180 关闭
+    double accelPlatform = 1000.0, // 平台加速度 mm/s²
+    double accelGalvo = 5000.0,    // 振镜加速度 mm/s²
+    double cornerFactor = 0.5,     // 拐角系数 0~1，尖角处速度衰减
+    double decelPlatform = 0)      // 平台减速度 mm/s²（0=同 accelPlatform）
 ```
+
+> **空移速度合成**：代码内部由平台/振镜两个空移速度**向量合成**为快移速度：`rapidSpeed = min(√(jumpSpeedPlatform² + jumpSpeedGalvo²), 1000)`（限幅 1000 mm/s，防采样点过疏）。旧版的单一 `rapidSpeed` 参数已拆为这两个。
+> **加减速参数**（`accelPlatform/accelGalvo/decelPlatform`）已在签名中定义并有变步距插补实现（`InterpolateSegmentWithAccel`），但当前 `Sample` 主流程仍走恒速 `InterpolateSegment`；`cornerFactor` 则已生效（见 §三/§五）。
 
 输出 `SampledTrajectory`：
 
@@ -271,7 +280,7 @@ var line = new PathPolyline { Closed = false };
 line.Points.Add(new Vec2(0, 0));
 line.Points.Add(new Vec2(100, 0));
 
-var traj = PathSampler.Sample(new[] { line }, feedSpeed: 80, rapidSpeed: 300, sampleRate: 1000);
+var traj = PathSampler.Sample(new[] { line }, feedSpeed: 80, jumpSpeedPlatform: 500, jumpSpeedGalvo: 2000, sampleRate: 1000);
 // feedStep = 80 * (1/1000) = 0.08 mm/点
 // 轮廓段约 100 / 0.08 = 1250 个激光开采样点（+ 空程 + 收尾点）
 Console.WriteLine($"点数={traj.Count}  时长={traj.Duration:F3}s");

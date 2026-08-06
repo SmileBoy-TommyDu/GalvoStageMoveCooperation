@@ -118,13 +118,13 @@ if (polylines.Count > MaxSampleContours)
     // 先抽稀再采样（防止后续 Sample() 超时）
     var reduced = PathSampler.Decimate(polylines, MaxSampleContours);
     Console.WriteLine($"轮廓抽稀：{polylines.Count} → {reduced.Count}");
-    
-    var traj = PathSampler.Sample(reduced, feedSpeed, rapidSpeed, sampleRate);
+
+    var traj = PathSampler.Sample(reduced, feedSpeed, jumpSpeedPlatform, jumpSpeedGalvo, sampleRate);
 }
 else
 {
     // 直接采样
-    var traj = PathSampler.Sample(polylines, feedSpeed, rapidSpeed, sampleRate);
+    var traj = PathSampler.Sample(polylines, feedSpeed, jumpSpeedPlatform, jumpSpeedGalvo, sampleRate);
 }
 ```
 
@@ -137,11 +137,18 @@ else
 ```csharp
 public static SampledTrajectory Sample(
     IReadOnlyList<PathPolyline> polylines,
-    double feedSpeed,       // mm/s
-    double rapidSpeed,      // mm/s
-    double sampleRate       // Hz
-)
+    double feedSpeed,           // mm/s（激光开，走轮廓）
+    double jumpSpeedPlatform,   // mm/s（平台空移速度）
+    double jumpSpeedGalvo,      // mm/s（振镜空移速度）
+    double sampleRate,          // Hz
+    double cornerAngleDeg = 150,   // 尖角保真阈值（内角 < 此值强制吸附顶点）；≥180 关闭
+    double accelPlatform = 1000.0, // 平台加速度 mm/s²
+    double accelGalvo = 5000.0,    // 振镜加速度 mm/s²
+    double cornerFactor = 0.5,     // 拐角系数 0~1，尖角速度衰减
+    double decelPlatform = 0)      // 平台减速度 mm/s²（0=同 accelPlatform）
 ```
+
+> **快移速度由两个空移速度向量合成**：`rapidSpeed = min(√(jumpSpeedPlatform² + jumpSpeedGalvo²), 1000)`。旧版单一 `rapidSpeed` 参数已拆为平台/振镜两个。`cornerFactor` 已生效（尖角减速 + 顶点吸附）；`accel*/decelPlatform` 已定义但 `Sample` 主流程暂走恒速插补。
 
 **命名空间**: `GalvoStage.Core.PathPlanning`  
 **返回类型**: `SampledTrajectory`
@@ -231,8 +238,11 @@ private static double InterpolateSegment(Vec2 a, Vec2 b, double step, double res
 |------|------|------|--------|
 | polylines | - | 已排序的折线集合（来自 OrderByNearest） | 1,000~20,000 |
 | feedSpeed | mm/s | 轮廓加工速度（激光开） | 80 |
-| rapidSpeed | mm/s | 孔间快移速度（激光关） | 300 |
+| jumpSpeedPlatform | mm/s | 平台空移速度（激光关） | 500 |
+| jumpSpeedGalvo | mm/s | 振镜空移速度（激光关） | 2000 |
 | sampleRate | Hz | 采样率（决定采样周期） | 1,000 |
+| cornerAngleDeg | ° | 尖角保真阈值（内角 < 此值吸附顶点） | 150 |
+| cornerFactor | - | 拐角速度衰减系数 0~1 | 0.5 |
 
 **返回对象**: [`SampledTrajectory`](file://e:\WorkSapce\GalvoStageMoveCooperation\src\GalvoStage.Core\PathPlanning\PathSampler.cs#L8-L18)
 
@@ -271,7 +281,8 @@ var polylines = DxfParser.ParseFile("demo.dxf");
 var traj = PathSampler.Sample(
     polylines, 
     feedSpeed: 80, 
-    rapidSpeed: 300, 
+    jumpSpeedPlatform: 500, 
+    jumpSpeedGalvo: 2000, 
     sampleRate: 1000
 );
 
@@ -413,14 +424,14 @@ return { Raw, StageX, StageY, GalvoX, GalvoY, fc, maxDev, vMax, aMax }
 | cutoffHz | Hz | 低通截止频率 | 手动：6.0 或自动搜索 |
 | galvoFov | mm | 振镜视场半径（半宽度） | 5.0（±5mm） |
 
-**截断规则**: `fc ∈ [0.1, min(fs/2.22, 60)] Hz`（Nyquist 定理 + 工程约束）
+**截断规则**: `fc ∈ [0.1, fs*0.45] Hz`（下限 0.1Hz 避免几乎不滤波，上限 0.45×fs 为奈奎斯特安全边界）
 
 ---
 
 ### 3.7 使用示例
 
 ```csharp
-var traj = PathSampler.Sample(polylines, 80, 300, 1000);
+var traj = PathSampler.Sample(polylines, 80, 500, 2000, 1000);
 
 // 手动指定截止频率
 var result = FrequencyDecomposer.Decompose(traj, cutoffHz: 6.0, galvoFov: 5.0);
@@ -509,7 +520,7 @@ return best            # 最佳可行解（收敛精度 0.05Hz）
 ### 4.5 使用示例
 
 ```csharp
-var traj = PathSampler.Sample(polylines, 80, 300, 1000);
+var traj = PathSampler.Sample(polylines, 80, 500, 2000, 1000);
 
 // 自动搜索最优 cutoff（推荐用法）
 var result = FrequencyDecomposer.DecomposeAuto(
@@ -556,7 +567,8 @@ else
 var traj = PathSampler.Sample(
     sampledPolys,
     feedSpeed: 80,      // mm/s
-    rapidSpeed: 300,    // mm/s
+    jumpSpeedPlatform: 500,  // mm/s
+    jumpSpeedGalvo: 2000,    // mm/s
     sampleRate: 1000    // Hz
 );
 Console.WriteLine($"采样点：{traj.Count:N0}, 时长：{traj.Duration:F1}s");

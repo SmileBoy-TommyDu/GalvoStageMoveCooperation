@@ -204,7 +204,7 @@ yi = b0·xi + b1·x1 + b2·x2 − a1·y1 − a2·y2;   // 二阶 IIR
 ## 六、示例
 
 ```csharp
-var traj = PathSampler.Sample(polylines, feedSpeed: 80, rapidSpeed: 300, sampleRate: 1000);
+var traj = PathSampler.Sample(polylines, feedSpeed: 80, jumpSpeedPlatform: 500, jumpSpeedGalvo: 2000, sampleRate: 1000);
 
 // 自动整定截止频率（振镜视场 ±5mm）
 var plan = FrequencyDecomposer.DecomposeAuto(traj, galvoFov: 5);

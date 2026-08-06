@@ -22,7 +22,7 @@ private static List<Geometry.Drilling.DrillingPattern.Hole> PlanGalvoFirst(
 
 **输出**：重排后的孔位列表（保证簇内走振镜、簇间才动平台）
 
-**核心思想**：空间聚类 → 簇序优化 → 簇内最近邻
+**核心思想**：空间聚类 → 簇序优化 → 簇内最近邻 + 2-opt
 
 **算法流水线**：
 ```
@@ -33,7 +33,7 @@ holes
   │  ④ 计数排序分桶 O(n)
   │  ⑤ 收集非空簇 + 质心
   │  ⑥ 莫顿码排序簇序 O(K log K)
-  │  ⑦ 簇内最近邻 O(Σmᵢ²)
+  │  ⑦ 簇内最近邻 + 2-opt O(Σmᵢ²)
   ▼
 ordered holes
 ```
@@ -332,56 +332,112 @@ y 位:   0   1   1
 
 ---
 
-## 九、步骤 6：簇内最近邻排序（第 165-191 行）
+## 九、步骤 6：簇内最近邻 + 2-opt 优化（第 231-243 行）
 
 ```csharp
 var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(n);
 foreach (int ci in clusterOrder)
 {
     var members = clusterMembers[ci];
-    double px = clusterCx[ci], py = clusterCy[ci];
-    var usedInCluster = new bool[members.Count];
-    for (int step = 0; step < members.Count; step++)
+    // 从簇中心出发，贪心走最近未访问孔，得到初始开路径
+    var tour = NearestNeighborInCluster(holes, members, clusterCx[ci], clusterCy[ci]);
+    // 簇内孔数不超阀值时用 2-opt 优化（簇受 FOV 约束，通常规模很小）
+    if (tour.Count <= TwoOptMaxCluster)
+        TwoOptImprove(holes, tour);
+    foreach (int idx in tour)
+        ordered.Add(holes[idx]);
+}
+```
+
+### 9.1 两阶段簇内排序
+
+| 阶段 | 方法 | 作用 |
+|---|---|---|
+| 构造 | `NearestNeighborInCluster` | 从簇质心出发贪心最近邻，生成初始开路径 |
+| 优化 | `TwoOptImprove` | 2-opt 反转消除交叉边，簇孔数 ≤ `TwoOptMaxCluster`(300) 时启用 |
+
+### 9.2 `NearestNeighborInCluster`（第 248-274 行）
+
+```csharp
+private static List<int> NearestNeighborInCluster(
+    List<...Hole> holes, List<int> members, double startX, double startY)
+{
+    int m = members.Count;
+    var tour = new List<int>(m);
+    var used = new bool[m];
+    double px = startX, py = startY;      // 起点 = 簇质心
+    for (int step = 0; step < m; step++)
     {
-        int bestIdx = -1;
-        double bestD2 = double.MaxValue;
-        for (int j = 0; j < members.Count; j++)
+        int bestJ = -1; double bestD2 = double.MaxValue;
+        for (int j = 0; j < m; j++)
         {
-            if (usedInCluster[j]) continue;
+            if (used[j]) continue;
             int idx = members[j];
-            double dx = holes[idx].X - px;
-            double dy = holes[idx].Y - py;
+            double dx = holes[idx].X - px, dy = holes[idx].Y - py;
             double d2 = dx * dx + dy * dy;
-            if (d2 < bestD2) { bestD2 = d2; bestIdx = j; }
+            if (d2 < bestD2) { bestD2 = d2; bestJ = j; }
         }
-        usedInCluster[bestIdx] = true;
-        ordered.Add(holes[members[bestIdx]]);
-        px = holes[members[bestIdx]].X;
-        py = holes[members[bestIdx]].Y;
+        used[bestJ] = true;
+        tour.Add(members[bestJ]);
+        px = holes[members[bestJ]].X;
+        py = holes[members[bestJ]].Y;
+    }
+    return tour;
+}
+```
+
+- 起点为簇质心（减少第一次大跳），贪心走最近未访问孔
+- 返回孔索引的**开路径**访问顺序（非闭合回路）
+- 复杂度：O(m²)，m 为簇内孔数
+
+### 9.3 `TwoOptImprove`（第 276-309 行）
+
+```csharp
+private static void TwoOptImprove(List<...Hole> holes, List<int> tour)
+{
+    int m = tour.Count;
+    if (m < 4) return;
+    bool improved = true;
+    int maxPasses = 20;
+    while (improved && maxPasses-- > 0)
+    {
+        improved = false;
+        for (int i = 0; i < m - 1; i++)
+            for (int k = i + 2; k < m; k++)
+            {
+                int a = tour[i], b = tour[i + 1], c = tour[k];
+                double before = Dist(holes, a, b);
+                double after  = Dist(holes, a, c);
+                if (k + 1 < m)   // 开路径：(c,d) 边仅当 k+1 < m 时存在
+                {
+                    int d = tour[k + 1];
+                    before += Dist(holes, c, d);
+                    after  += Dist(holes, b, d);
+                }
+                if (after + 1e-9 < before)
+                {
+                    tour.Reverse(i + 1, k - i);
+                    improved = true;
+                }
+            }
     }
 }
 ```
 
-### 9.1 逐行解析
+**开路径 2-opt 要点**：
+- 反转 `[i+1, k]` 区间以消除边 `(a,b)`/`(c,d)` 的交叉
+- **开路径特判**：末端点无回边，`k+1 == m` 时仅比较 `(a,b)` vs `(a,c)`
+- `maxPasses=20` 上限防止极端数据反复迭代；`1e-9` 容差防浮点抖动
+- 复杂度：O(passes · m²)，故仅对 `m ≤ 300` 的簇启用
 
-| 行号 | 作用 |
-|---|---|
-| 166 | 预分配最终结果列表 |
-| 167 | 按莫顿序遍历簇 |
-| 169 | 取出当前簇的成员列表 |
-| 171 | 起点 = 簇质心（从中心出发，减少第一次大跳） |
-| 172 | 簇内访问标记（懒删除） |
-| 173-185 | **贪心最近邻**：遍历未访问成员，找距离当前点最近的 |
-| 186-189 | 标记已访问 + 加入结果 + 更新当前位置 |
-
-### 9.2 复杂度分析
+### 9.4 复杂度分析
 
 - 外层循环：K 个簇
-- 内层双层循环：每簇 O(m²)，m 为簇内孔数
+- 每簇：最近邻 O(m²) + 2-opt O(passes·m²)
 - 总复杂度：O(Σmᵢ²) ≈ O(K · m̄²)，m̄ 为平均簇大小
-- 典型：K=1500, m̄=40 → 1500 × 1600 = 240 万次操作
+- 典型：K=1500, m̄=40 → 约 240 万次基础操作，2-opt 摊薄后仍在毫秒级
 
-### 9.3 为何不用 KD-Tree 加速？
+### 9.5 为何不用 KD-Tree 加速？
 
 - 簇内孔数通常 < 100，暴力法更快（无建树开销）
 - 代码简洁，缓存友好
@@ -544,7 +600,7 @@ for (int step = 0; step < n; step++)
 
 | 算法 | 时间复杂度 | 空间复杂度 | 适用场景 | 路径质量 |
 |---|---|---|---|---|
-| **PlanGalvoFirst** | O(n + K log K + Σmᵢ²) | O(n + totalCells) | 密集大数据（density ≥ 4） | ★★★★★（平台动 K 次） |
+| **PlanGalvoFirst** | O(n + K log K + Σmᵢ²) | O(n + totalCells) | 密集大数据（density ≥ 4） | ★★★★★（平台动 K 次 + 簇内 2-opt） |
 | **OrderByZonal** | O(n log n) | O(n) | 超大数据（n > 5000） | ★★★☆☆（无簇内优化） |
 | **OrderByNearestGrid** | O(n · R²) 平均 | O(n + dim²) | 小数据（n ≤ 5000） | ★★★★☆（全局最近邻） |
 
@@ -557,7 +613,7 @@ for (int step = 0; step < n; step++)
 | 密度门槛 | 4.0 | 经验值，平衡 GF 与回退策略的临界点 |
 | cellSize | 2·FOV | 物理约束（振镜覆盖范围） |
 | 簇序排序 | 莫顿码 | 比 Hilbert 简单，效果接近，O(K log K) 足够快 |
-| 簇内排序 | 暴力最近邻 | 小簇（m<100）比 KD-Tree 更快 |
+| 簇内排序 | 最近邻 + 2-opt | 小簇（m≤300）质量优于纯贪心，消除交叉边 |
 | 分桶策略 | 计数排序 | O(n) 严格线性，缓存友好 |
 | 搜索策略 | 环形扩展 | 避免全局扫描，平均 O(n · R²) |
 
@@ -590,12 +646,12 @@ for (int step = 0; step < n; step++)
 
 ## 十六、结论
 
-`PlanGalvoFirst` 是振镜优先策略的**核心实现**，通过"空间聚类 + 莫顿簇序 + 簇内最近邻"三步流水线，将平台跳跃次数从 n 次降至 K 次（K=簇数，典型 K≈1500）。
+`PlanGalvoFirst` 是振镜优先策略的**核心实现**，通过“空间聚类 + 莫顿簇序 + 簇内最近邻 + 2-opt”四步流水线，将平台跳跃次数从 n 次降至 K 次（K=簇数，典型 K≈1500）。
 
 **算法亮点**：
 1. **密度门槛**：稀疏数据自动回退，避免退化
 2. **计数排序**：O(n) 严格线性，缓存友好
 3. **莫顿码簇序**：空间连续性保证
-4. **簇内暴力法**：小簇场景比 KD-Tree 更快
+4. **簇内最近邻 + 2-opt**：小簇场景快且消除交叉边，质量优于纯贪心
 
 **适用场景**：密集大数据（density ≥ 4），典型如 PCB 钻孔（10k-1M 孔），平台行程 ↓ 40-86%，加工时间 ↓ 70%+。

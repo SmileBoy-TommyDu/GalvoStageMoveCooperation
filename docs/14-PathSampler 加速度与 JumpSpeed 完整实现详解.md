@@ -2,10 +2,12 @@
 
 ## 一、概述
 
-本次更新**完整实现了运动动力学参数**，解决了之前遗留的两个核心问题：
+本次更新围绕运动动力学参数做了两件事，二者落地程度**不同**，务必区分：
 
-1. ✅ **加速度完整实现**：计算加速段/减速段，动态调整采样步长
-2. ✅ **JumpSpeed 独立配置**：平台和振镜空移速度分离
+1. ✅ **JumpSpeed 独立配置（已生效）**：平台和振镜空移速度分离，`Sample` 主流程按 `rapidSpeed = min(√(jumpSpeedPlatform² + jumpSpeedGalvo²), 1000)` 合成空移速度并参与采样。
+2. ⚠️ **加速度三段式采样（已编写但未接入主流程）**：`CalculateAccelDecelDistances` 与 `InterpolateSegmentWithAccel` 两个方法已在 `PathSampler.cs` 中实现，但 `Sample` 主流程**当前并未调用**它们——空程段（L79）与轮廓段（L106）都仍走恒速的 `InterpolateSegment`。因此 `accelPlatform / accelGalvo / decelPlatform` 目前**不参与实际采样计算**，仅作为签名参数保留、等待后续接线。
+
+> 阅读提示：本文第三、四节描述的三段式加减速逻辑是**已存在但尚未启用**的实现，代表设计意图与代码现状，而非当前采样管线的实际行为。若要判断某次采样是否变速，以 `Sample` 是否调用 `InterpolateSegmentWithAccel` 为准——当前答案是"否"。
 
 ---
 
@@ -55,7 +57,9 @@ public static SampledTrajectory Sample(
 
 ---
 
-## 三、加速度完整实现
+## 三、加速度三段式实现（已编写，未接入主流程）
+
+> ⚠️ **状态说明**：本节代码对应 `PathSampler.CalculateAccelDecelDistances` 与 `InterpolateSegmentWithAccel`。它们已存在于源码中，但 `Sample` 主循环并未调用——当前采样仍是恒速。以下内容描述这两个方法的内部逻辑，供后续接线时参考，并非现网采样行为。
 
 ### 3.1 加速段/减速段计算
 
@@ -200,7 +204,12 @@ while (s < len)
 // 计算合成空移速度（平台和振镜的向量和）
 double rapidSpeed = Math.Sqrt(jumpSpeedPlatform * jumpSpeedPlatform + 
                               jumpSpeedGalvo * jumpSpeedGalvo);
+
+// 限制最大速度，防止过快导致采样点过疏
+rapidSpeed = Math.Min(rapidSpeed, 1000.0);  // 上限 1000 mm/s
 ```
+
+> ⚠️ 注意 1000 mm/s 的上限：当 `jumpSpeedPlatform=500 / jumpSpeedGalvo=2000` 时，向量合成约 2062 mm/s，会被**钳到 1000 mm/s**。因此后文"合成速度"相关的示例数值仅代表钳制前的理论值，实际参与采样的 `rapidSpeed` 不超过 1000。
 
 ### 4.2 加速度选择
 
@@ -292,19 +301,21 @@ MainViewModel (属性)
     ↓ (方法参数)
 PathSampler.Sample(..., jumpSpeedPlatform, jumpSpeedGalvo, accelPlatform, accelGalvo, ...)
     ↓ (内部计算)
-rapidSpeed = √(jumpSpeedPlatform² + jumpSpeedGalvo²)
-accel = min(accelPlatform, accelGalvo)
+rapidSpeed = min(√(jumpSpeedPlatform² + jumpSpeedGalvo²), 1000)   ← 已生效，参与空程采样
     ↓
-InterpolateSegmentWithAccel(..., targetSpeed, accel, decel, ...)
-    ↓
-三段式采样：加速段 → 匀速段 → 减速段
+InterpolateSegment(...)   ← 恒速插补（空程与轮廓段均走此路径）
+
+// accelPlatform / accelGalvo / decelPlatform 已随参数传入，但主流程当前未消费；
+// InterpolateSegmentWithAccel（三段式加减速）已实现但未被调用。
 ```
 
 ---
 
 ## 六、效果对比与验证
 
-### 6.1 加速度效果
+### 6.1 加速度效果（三段式接入后的预期）
+
+> ⚠️ 以下"改进后"数据是三段式加减速**接入主流程后**的预期效果，当前采样仍为恒速，尚未产生此效果。
 
 **测试场景**：
 ```
@@ -422,13 +433,12 @@ cornerFactor = 0.8
 - 保守估计确保两者都能达到
 - 否则会出现一轴已完成加速，另一轴还在加速的情况
 
-### Q3：加速度参数为什么没有完全使用？
+### Q3：加速度参数目前用上了吗？
 
 **A**：
-- **已完整使用！**
-- `InterpolateSegmentWithAccel` 中实现了三段式采样
-- 加速段、匀速段、减速段分别处理
-- 动态调整采样步长
+- **暂时没有。** `accelPlatform / accelGalvo / decelPlatform` 会随参数传入 `Sample`，但主流程尚未消费它们。
+- 三段式采样逻辑已写在 `InterpolateSegmentWithAccel` / `CalculateAccelDecelDistances` 中，但没有任何调用点——`Sample` 的空程段与轮廓段都走恒速的 `InterpolateSegment`。
+- 待后续把 `InterpolateSegmentWithAccel` 接入主循环后，加速段/匀速段/减速段与动态步长才会真正生效。
 
 ### Q4：如何优化空程时间？
 
@@ -449,15 +459,15 @@ cornerFactor = 0.8
 
 ### 9.1 核心改进
 
-1. ✅ **加速度完整实现**：
-   - 计算加速段/减速段长度
-   - 三段式采样（加速→匀速→减速）
-   - 动态调整采样步长
-
-2. ✅ **JumpSpeed 独立配置**：
+1. ✅ **JumpSpeed 独立配置（已生效）**：
    - 平台和振镜空移速度分离
-   - 向量合成计算 rapidSpeed
-   - 加速度独立配置
+   - 向量合成计算 rapidSpeed，并钳制到 1000 mm/s 上限
+   - 参与 `Sample` 空程段采样
+
+2. ⚠️ **加速度三段式采样（已编写，未接入）**：
+   - `CalculateAccelDecelDistances` / `InterpolateSegmentWithAccel` 已实现
+   - 但 `Sample` 主流程尚未调用，`accel*/decelPlatform` 当前不参与采样
+   - 待接线后才产生加速→匀速→减速的动态步长
 
 ### 9.2 物理意义
 
@@ -470,9 +480,10 @@ cornerFactor = 0.8
 
 ### 9.3 下一步优化方向
 
-1. ✅ **实时监控**：显示实际速度和加速度曲线
-2. ✅ **自适应参数**：根据材料/厚度自动推荐参数
-3. ✅ **参数学习**：基于质量数据自动优化参数
+1. ⬜ **把三段式加减速接入 `Sample` 主流程**（当前最关键的缺口）
+2. ⬜ **实时监控**：显示实际速度和加速度曲线
+3. ⬜ **自适应参数**：根据材料/厚度自动推荐参数
+4. ⬜ **参数学习**：基于质量数据自动优化参数
 
 ---
 

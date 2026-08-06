@@ -15,6 +15,11 @@
   - [PathSampler](#pathsampler)
   - [DecomposeResult](#decomposeresult)
   - [FrequencyDecomposer](#frequencydecomposer)
+- [Drilling — 钻孔路径规划](#drilling--钻孔路径规划)
+  - [DrillingPattern](#drillingpattern)
+  - [TrepanParams](#trepanparams)
+  - [DrillingStrategy](#drillingstrategy)
+  - [DrillPlanner](#drillplanner)
 - [Simulation — 动力学仿真](#simulation--动力学仿真)
   - [StageAxisModel](#stageaxismodel)
   - [GalvoAxisModel](#galvoaxismodel)
@@ -57,6 +62,7 @@ double d = a.DistanceTo(b);       // 5.0
 | `Points` | `List<Vec2>` | 顶点序列 |
 | `Closed` | `bool` | 是否闭合（首尾相连） |
 | `Layer` | `string` | 所属图层名（默认 `"0"`） |
+| `FromCircle` | `bool` | 是否由 CIRCLE 实体细分而来（混合解析中 CIRCLE 同时写入折线与钻孔两份数据）。双模式加工时圆孔由钻孔链路环切处理，此标记用于将其从折线链路排除，避免圆被加工两次。默认 `false` |
 | `Length` | `double` | 折线总长（闭合时含收尾段） |
 
 ---
@@ -71,21 +77,39 @@ double d = a.DistanceTo(b);       // 5.0
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
-| `ParseFile` | `static List<PathPolyline> ParseFile(string path)` | 从文件路径解析 |
-| `Parse` | `static List<PathPolyline> Parse(TextReader reader)` | 从文本流解析 |
+| `ParseFile` | `static List<PathPolyline> ParseFile(string path)` | 从文件路径解析（折线模式） |
+| `Parse` | `static List<PathPolyline> Parse(Stream stream)` | 从字节流解析（折线模式） |
+| `ParseFileMixed` | `static MixedParseResult ParseFileMixed(string path)` | **双模式分离解析**：一次遍历同时提取折线特征与钻孔特征 |
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
 | `ChordTolerance` | `0.01` | 圆弧细分弦高误差（mm） |
 
-**支持实体**：`LINE`、`CIRCLE`、`ARC`、`LWPOLYLINE`（含凸度 bulge）、`POLYLINE`/`VERTEX`、`ELLIPSE`、`SPLINE`（NURBS/拟合点）。
+**支持实体**：`LINE`、`CIRCLE`、`ARC`、`LWPOLYLINE`（含凸度 bulge）、`POLYLINE`/`VERTEX`、`ELLIPSE`、`SPLINE`（NURBS/拟合点）、`INSERT`（块引用展开，`BLOCKS` 段定义 + 平移/旋转/缩放实例化）。
+
+采用**单遍字节流式解析**：直接在字节缓冲区上解析组码与数值，不为数值分配字符串、不一次性把全部组码读入内存，可在数秒内处理数百 MB 大文件。
 
 ```csharp
 List<PathPolyline> shapes = DxfParser.ParseFile(@"C:\part.dxf");
 Console.WriteLine($"轮廓数={shapes.Count}, 总长={shapes.Sum(p => p.Length):F1} mm");
 ```
 
-> **注**：仅支持 ASCII DXF；不支持二进制 DXF、块引用（INSERT）展开。未识别实体会被忽略。
+#### MixedParseResult
+
+双模式分离解析结果：折线特征（轮廓）与钻孔特征（小圆）分开存放。CIRCLE 实体**同时**写入两份数据——钻孔链路（作为孔）与折线链路（作为闭合圆轮廓，且 `FromCircle=true`）——其他实体只写入折线数据。
+
+| 成员 | 类型 | 说明 |
+|------|------|------|
+| `Polylines` | `List<PathPolyline>` | 折线特征（LWPOLYLINE / LINE / ARC / ELLIPSE / SPLINE / POLYLINE / INSERT 展开 / CIRCLE 轮廓） |
+| `DrillingHoles` | `DrillingPattern` | 钻孔特征（CIRCLE 作为孔） |
+| `CircleCount` | `int` | CIRCLE 总数 |
+
+```csharp
+var mixed = DxfParser.ParseFileMixed(@"C:\board.dxf");
+Console.WriteLine($"轮廓 {mixed.Polylines.Count} 条，孔 {mixed.DrillingHoles.Holes.Count} 个");
+```
+
+> **注**：仅支持 ASCII DXF；不支持二进制 DXF。未识别实体会被忽略。
 
 ---
 
@@ -113,16 +137,32 @@ Console.WriteLine($"轮廓数={shapes.Count}, 总长={shapes.Sum(p => p.Length):
 ```csharp
 static SampledTrajectory Sample(
     IReadOnlyList<PathPolyline> polylines,
-    double feedSpeed,     // 进给速度 mm/s（轮廓，激光开）
-    double rapidSpeed,    // 快移速度 mm/s（空程，激光关）
-    double sampleRate)    // 采样率 Hz
+    double feedSpeed,            // 进给速度 mm/s（轮廓，激光开）
+    double jumpSpeedPlatform,    // 平台空移速度 mm/s
+    double jumpSpeedGalvo,       // 振镜空移速度 mm/s
+    double sampleRate,           // 采样率 Hz
+    double cornerAngleDeg = 150, // 尖角保真阈值（内角 < 此值的顶点强制吸附）；≥180 关闭
+    double accelPlatform = 1000, // 平台加速度 mm/s²
+    double accelGalvo = 5000,    // 振镜加速度 mm/s²
+    double cornerFactor = 0.5,   // 拐角系数 0-1：尖角处速度衰减 0=不减 1=完全停
+    double decelPlatform = 0)    // 平台减速度 mm/s²（0=同 accelPlatform）
 ```
 
-**内部处理**：① 贪心最近邻排序（可整体反向折线）减少空程；② 空程/轮廓按各自速度等距插补；③ 跨段相位连续。
+- 空移合成速度 `rapidSpeed = min(√(jumpSpeedPlatform² + jumpSpeedGalvo²), 1000)` mm/s（平台与振镜向量和，并限速 1000）。
+- **内部处理**：① 贪心最近邻排序（可整体反向折线；>5000 条自动切网格加速）减少空程；② 空程/轮廓按各自速度等距插补；③ 跨段相位连续；④ 尖角保真（顶点吸附）。
 
 ```csharp
-var traj = PathSampler.Sample(shapes, feedSpeed: 80, rapidSpeed: 300, sampleRate: 1000);
+var traj = PathSampler.Sample(shapes, feedSpeed: 80,
+    jumpSpeedPlatform: 500, jumpSpeedGalvo: 2000, sampleRate: 1000);
 ```
+
+| 其他方法 | 说明 |
+|----------|------|
+| `Decimate(polylines, maxCount)` | 空间均匀抽稀：按 √maxCount×√maxCount 网格分桶后逐桶轮流取样，得到覆盖全版图的代表性子集（≤maxCount 时原样返回） |
+
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `MaxSampleContours` | `20_000` | 采样/仿真的轮廓数上限，超过时应先 `Decimate` |
 
 ### DecomposeResult
 
@@ -168,6 +208,86 @@ static DecomposeResult DecomposeAuto(
 var plan = FrequencyDecomposer.DecomposeAuto(traj, galvoFov: 5);
 if (plan.MaxGalvoDeviation > 5)
     Console.WriteLine("警告：振镜偏摆超出视场，需增大视场或降低进给速度");
+```
+
+---
+
+## Drilling — 钻孔路径规划
+
+命名空间：`GalvoStage.Core.Drilling`（钻孔点集位于 `GalvoStage.Core.Geometry.Drilling`）。
+
+### DrillingPattern
+
+PCB 钻孔点集数据模型（与 `PathPolyline` 并列的独立加工模式，只处理离散孔位）。
+
+| 成员 | 类型 | 说明 |
+|------|------|------|
+| `Holes` | `List<Hole>` | 孔位列表 |
+| `Bounds` | `(MinX,MinY,MaxX,MaxY)?` | 全局包围盒（缓存） |
+| `LayerCounts` | `Dictionary<string,int>` | 按图层分组计数 |
+| `DiameterCounts` | `Dictionary<double,int>` | 按孔径分组计数（保留 3 位小数归类） |
+| `RecomputeBounds()` | `void` | 重算包围盒、图层与孔径统计 |
+
+**Hole 结构**：`X`、`Y`、`Diameter`（0=未知）、`Layer`、`OriginalIndex`、`ProcessParams`；`RecomputeProcessParams()` 按孔径自动选择工艺参数分档。
+
+### TrepanParams
+
+激光钻孔环切工艺参数（按孔径分档配置，`init` 只读）。
+
+| 成员 | 类型 | 说明 |
+|------|------|------|
+| `Power` | `double` | 激光功率（W） |
+| `OffsetRings` | `int` | 补偿圈数（扩孔层数） |
+| `FeedRate` | `double` | 进给速度（mm/s） |
+| `HoldTime` | `double` | 持留时间（ms） |
+| `CoolDownInterval` | `double` | 冷却间隔（ms） |
+| `DutyCycle` | `double` | 脉冲占空比（0-1） |
+
+**分档预设**（`CreateForDiameter(d)` 自动选择）：
+
+| 预设 | 孔径 d | Power | Rings | Feed | Hold | Cool | Duty |
+|------|--------|-------|-------|------|------|------|------|
+| `SmallHole` | ≤ 1mm | 5000 | 1 | 80 | 20 | 0 | 1.0 |
+| `MediumHole` | 1–3mm | 8000 | 2 | 100 | 30 | 50 | 1.0 |
+| `LargeHole` | 3–5mm | 12000 | 3 | 120 | 40 | 100 | 0.9 |
+| `ExtraLargeHole` | > 5mm | 15000 | 5 | 150 | 50 | 150 | 0.85 |
+
+`Custom(power, rings, feed, hold, coolDown=0, duty=1.0)` 可手动配置。
+
+### DrillingStrategy
+
+钻孔加工策略枚举（影响孔位访问顺序）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `TimeOptimal` | 加工时间最短：纯空间分区 + 分区内 TSP，忽略孔径分组（默认） |
+| `QualityOptimal` | 工艺效果优先：按孔径分组，同一种孔径全幅面一次加工完，再加工下一种（组内仍按分区+TSP） |
+
+### DrillPlanner
+
+静态类。将孔位列表优化为最短加工路径（振镜优先聚类 + 分区内 2-opt TSP）。
+
+```csharp
+static DrillingTrajectory Plan(
+    DrillingPattern pattern,
+    double dwellTimeMs = 50.0,       // 单孔停留时间 ms
+    double galvoFov = 5.0,           // 振镜半视场 mm（聚类网格尺寸）
+    bool galvoFirst = false,         // 振镜优先：2·FOV 网格聚类，簇内全走振镜，仅簇间动平台
+    double jumpSpeedPlatform = 500,  // 平台空移速度 mm/s
+    double jumpSpeedGalvo = 2000,    // 振镜空移速度 mm/s
+    double sampleRate = 1000,        // 采样率 Hz
+    DrillingStrategy strategy = DrillingStrategy.TimeOptimal)
+```
+
+**振镜优先策略**（`galvoFirst=true`）：以 `2·galvoFov` 为网格尺寸将孔聚类→按簇质心莫顿码（Z-order）排簇→簇内先最近邻贪心再 2-opt 优化（簇孔数 ≤ 300 时）。密度（均孔数/单元）< 4 时回退到 Z-order 或网格最近邻排序。
+
+**返回** `DrillingTrajectory`：`Moves`（`HoleMove` 列表）、`HoleCount`、`TotalDurationMs`、`SampledTrajectory`（用于激光控制的采样轨迹）。
+
+```csharp
+foreach (var h in pattern.Holes) h.RecomputeProcessParams(); // 先配工艺参数
+var traj = DrillPlanner.Plan(pattern, galvoFov: 5, galvoFirst: true,
+    strategy: DrillingStrategy.QualityOptimal);
+Console.WriteLine($"{traj.HoleCount:N0} 孔，~{traj.TotalDurationMs/1000:F1}s");
 ```
 
 ---
@@ -289,8 +409,9 @@ using GalvoStage.Core.Simulation;
 // 1) 解析 DXF
 var polylines = DxfParser.ParseFile("demo.dxf");
 
-// 2) 等时采样（进给 80mm/s，快移 300mm/s，采样率 1kHz）
-var traj = PathSampler.Sample(polylines, feedSpeed: 80, rapidSpeed: 300, sampleRate: 1000);
+// 2) 等时采样（进给 80mm/s，平台空移 500mm/s，振镜空移 2000mm/s，采样率 1kHz）
+var traj = PathSampler.Sample(polylines, feedSpeed: 80,
+    jumpSpeedPlatform: 500, jumpSpeedGalvo: 2000, sampleRate: 1000);
 
 // 3) 频率分解（自动搜索截止频率，振镜半视场 ±5mm）
 var plan = FrequencyDecomposer.DecomposeAuto(traj, galvoFov: 5);
