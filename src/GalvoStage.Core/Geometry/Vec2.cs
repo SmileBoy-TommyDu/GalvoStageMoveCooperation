@@ -34,6 +34,9 @@ public sealed class PathPolyline
     public List<Vec2> Points { get; } = new();
     public bool Closed { get; set; }
     public string Layer { get; set; } = "0";
+    /// <summary>是否由 CIRCLE 实体细分而来（混合解析中 CIRCLE 同时写入折线与钻孔两份数据）。
+    /// 双模式加工时圆孔由钻孔链路处理，此标记用于将其从折线链路排除，避免重复加工。</summary>
+    public bool FromCircle { get; set; }
 
     public double Length
     {

@@ -437,21 +437,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 双模式分离分解：折线链路与钻孔链路独立规划，互不干扰。
-    /// 折线链路：等时采样 → 频域分解 → 生成 Plan/Sim；
-    /// 钻孔链路：振镜优先聚类 → 环切轨迹 → 生成 DrillingTrajectory。
+    /// 双模式分解：折线链路与钻孔链路合并为一条轨迹，一次频域分解。
+    /// 仿真时先加工折线轮廓（激光沿轮廓出光），再加工圆孔（环切），
+    /// 两种模式共享同一份 Plan/Sim，避免钻孔覆盖折线导致只加工其一。
     /// </summary>
     public void DecomposeBoth()
     {
-        // 折线链路
-        if (Polylines.Count > 0)
+        bool hasPoly = Polylines.Count > 0;
+        bool hasDrill = DrillingPattern != null && DrillingPattern.Holes.Count > 0;
+        if (!hasPoly && !hasDrill) return;
+
+        // 钻孔链路：先做路径规划（工艺参数 + 振镜优先聚类 + 环切动画），生成 DrillingTrajectory
+        if (hasDrill)
         {
-            Decompose();
-        }
-        // 钻孔链路
-        if (DrillingPattern != null && DrillingPattern.Holes.Count > 0)
-        {
-            // ① 按孔径分档设置工艺参数
             var holes = DrillingPattern.Holes;
             for (int i = 0; i < holes.Count; i++)
             {
@@ -459,26 +457,65 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 h.RecomputeProcessParams();
                 holes[i] = h;
             }
-            
-            // ② 钻孔路径规划（振镜优先，添加采样参数）
             DrillingTrajectory = DrillPlanner.Plan(DrillingPattern, dwellTimeMs: 50.0,
                 galvoFov: GalvoFov, galvoFirst: true,
                 jumpSpeedPlatform: JumpSpeedPlatform, jumpSpeedGalvo: JumpSpeedGalvo,
                 sampleRate: SampleRate);
-            PlanInfo += $"\n\n[钻孔链路] 规划完成：{DrillingTrajectory.Moves.Count:N0} 个孔位移动";
-            DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 已规划路径";
-            
-            // ③ 生成环切动画帧（用于 UI 可视化）
             TrepanAnimationFrames = TrepanAnimationGenerator.GenerateAnimationFrames(
                 DrillingPattern, samplesPerRing: 36);
             TrepanAnimationDuration = TrepanAnimationGenerator.CalculateTotalDuration(
                 DrillingPattern);
             CurrentAnimationFrame = 0;
-            PlanInfo += $"\n环切动画：{TrepanAnimationFrames.Count} 帧，预计时长 {TrepanAnimationDuration:F0} ms";
-            
-            // ④ 钻孔轨迹采样和仿真关联（关键！确保激光控制正确）
-            DecomposeDrilling();
         }
+
+        // 仅折线 → 走原折线分解；仅钻孔 → 走原钻孔分解（DrillingTrajectory 已就绪）
+        if (hasPoly && !hasDrill) { Decompose(); return; }
+        if (!hasPoly && hasDrill) { DecomposeDrilling(); return; }
+
+        // 双模式：折线采样 + 钻孔采样 拼接为单条轨迹，一次分解 → 先加工轮廓再加工圆孔
+        // 圆孔由钻孔链路处理，排除 CIRCLE 细分而来的折线（FromCircle），避免圆被加工两次
+        var contourPolys = Polylines.Where(p => !p.FromCircle).ToList();
+        if (contourPolys.Count == 0) { DecomposeDrilling(); return; }
+
+        var trajP = PathSampler.Sample(contourPolys, FeedSpeed, JumpSpeedPlatform, JumpSpeedGalvo, SampleRate,
+            cornerAngleDeg: 150, accelPlatform: AccelPlatform, accelGalvo: AccelGalvo, cornerFactor: CornerFactor);
+        Vec2? startFrom = trajP.Count > 0 ? new Vec2(trajP.X[^1], trajP.Y[^1]) : (Vec2?)null;
+        var trajD = BuildDrillingSampledTrajectory(out int trepanCount, out int pointCount,
+            out string dnote, out var simMoves, startFrom);
+
+        var combined = ConcatTrajectories(trajP, trajD);
+
+        Plan = AutoCutoff
+            ? FrequencyDecomposer.DecomposeAuto(combined, GalvoFov)
+            : FrequencyDecomposer.Decompose(combined, CutoffHz, GalvoFov);
+        if (AutoCutoff) CutoffHz = Math.Round(Plan.CutoffHz, 2);
+
+        RebuildSimulator();
+
+        string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
+        PlanInfo =
+            dnote +
+            $"【双模式加工】轮廓 {contourPolys.Count:N0} 条 + 钻孔 {DrillingTrajectory.Moves.Count:N0} 个\n" +
+            $"折线采样 {trajP.Count:N0} 点 + 钻孔采样 {trajD.Count:N0} 点 = 合计 {combined.Count:N0} 点   时长：{combined.Duration:F1} s\n" +
+            $"钻孔方式（预览子集）：环切 {trepanCount:N0} 孔 / 点钻 {pointCount:N0} 孔\n" +
+            $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
+            $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
+            $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s   峰值加速度：{Plan.StageMaxAcceleration:F0} mm/s²";
+        DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 双模式已规划（折线+钻孔一并仿真）";
+        SceneChanged?.Invoke();
+    }
+
+    /// <summary>拼接两条采样轨迹（a 在前、b 在后）为单条轨迹，共享采样率。</summary>
+    private static SampledTrajectory ConcatTrajectories(SampledTrajectory a, SampledTrajectory b)
+    {
+        int na = a.Count, nb = b.Count;
+        var x = new double[na + nb];
+        var y = new double[na + nb];
+        var l = new bool[na + nb];
+        Array.Copy(a.X, 0, x, 0, na); Array.Copy(b.X, 0, x, na, nb);
+        Array.Copy(a.Y, 0, y, 0, na); Array.Copy(b.Y, 0, y, na, nb);
+        Array.Copy(a.LaserOn, 0, l, 0, na); Array.Copy(b.LaserOn, 0, l, na, nb);
+        return new SampledTrajectory { SampleRate = a.SampleRate, X = x, Y = y, LaserOn = l };
     }
 
     /// <summary>
@@ -496,12 +533,48 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        var traj = BuildDrillingSampledTrajectory(out int trepanCount, out int pointCount,
+            out string note, out var simMoves);
+        var moves = DrillingTrajectory.Moves;
+
+        Plan = AutoCutoff
+            ? FrequencyDecomposer.DecomposeAuto(traj, GalvoFov)
+            : FrequencyDecomposer.Decompose(traj, CutoffHz, GalvoFov);
+        if (AutoCutoff) CutoffHz = Math.Round(Plan.CutoffHz, 2);
+
+        RebuildSimulator();
+
+        string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
+        // 逐孔动力学预检（对全量孔，非仅预览子集）
+        string precheck = PrecheckDrillDynamics(moves);
+        string precheckLine = precheck.Length > 0 ? precheck : "逐孔预检：✅ 全部孔径在当前进给下可行\n";
+        PlanInfo =
+            note +
+            precheckLine +
+            $"钻孔仿真预览：{simMoves.Count:N0} 孔 / 全量加工 {moves.Count:N0} 孔   采样点数：{Plan.Count:N0}   时长：{traj.Duration:F1} s\n" +
+            $"加工方式（预览子集）：环切 {trepanCount:N0} 孔 / 点钻 {pointCount:N0} 孔\n" +
+            $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
+            $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
+            $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s\n" +
+            $"平台峰值加速度：{Plan.StageMaxAcceleration:F0} mm/s²";
+        DrillingInfo += "\n✅ 仿真已准备，点击“开始仿真”";
+        SceneChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// 钻孔轨迹等时采样：孔间快移插补（激光关）+ 按孔径环切（激光开=钻孔）。
+    /// 只负责采样，不设置 Plan/Sim，供 DecomposeDrilling 与双模式合并复用。
+    /// </summary>
+    /// <param name="startFrom">采样起点（双模式下传入折线末点，使第一个孔产生正确的快移过渡）；为 null 时取首孔位置。</param>
+    private SampledTrajectory BuildDrillingSampledTrajectory(
+        out int trepanCount, out int pointCount, out string note,
+        out IReadOnlyList<DrillPlanner.HoleMove> simMoves, Vec2? startFrom = null)
+    {
         // 仿真孔数上限：2000 孔 × 50ms 停留 @1kHz ≈ 10 万采样点，与现有管线规模一致。
         // 注意：抽样只用于“仿真预览”，全部 moves 已在 DrillingTrajectory 中，G 代码导出/加工不受影响。
         const int MaxSimHoles = 2_000;
         var moves = DrillingTrajectory.Moves;
-        string note = "";
-        IReadOnlyList<DrillPlanner.HoleMove> simMoves;
+        note = "";
         if (moves.Count > MaxSimHoles)
         {
             simMoves = SampleUniform(moves, MaxSimHoles);
@@ -516,9 +589,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var xs = new List<double>(1 << 17);
         var ys = new List<double>(1 << 17);
         var laser = new List<bool>(1 << 17);
-        int trepanCount = 0, pointCount = 0;
+        trepanCount = 0; pointCount = 0;
 
-        Vec2 cur = new(simMoves[0].Position.X, simMoves[0].Position.Y);
+        Vec2 cur = startFrom ?? new Vec2(simMoves[0].Position.X, simMoves[0].Position.Y);
         foreach (var m in simMoves)
         {
             double cx = m.Position.X, cy = m.Position.Y;
@@ -573,36 +646,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
         }
 
-        var traj = new SampledTrajectory
+        return new SampledTrajectory
         {
             SampleRate = SampleRate,
             X = xs.ToArray(),
             Y = ys.ToArray(),
             LaserOn = laser.ToArray()
         };
-
-        Plan = AutoCutoff
-            ? FrequencyDecomposer.DecomposeAuto(traj, GalvoFov)
-            : FrequencyDecomposer.Decompose(traj, CutoffHz, GalvoFov);
-        if (AutoCutoff) CutoffHz = Math.Round(Plan.CutoffHz, 2);
-
-        RebuildSimulator();
-
-        string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
-        // 逐孔动力学预检（对全量孔，非仅预览子集）
-        string precheck = PrecheckDrillDynamics(moves);
-        string precheckLine = precheck.Length > 0 ? precheck : "逐孔预检：✅ 全部孔径在当前进给下可行\n";
-        PlanInfo =
-            note +
-            precheckLine +
-            $"钻孔仿真预览：{simMoves.Count:N0} 孔 / 全量加工 {moves.Count:N0} 孔   采样点数：{Plan.Count:N0}   时长：{traj.Duration:F1} s\n" +
-            $"加工方式（预览子集）：环切 {trepanCount:N0} 孔 / 点钻 {pointCount:N0} 孔\n" +
-            $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
-            $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
-            $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s\n" +
-            $"平台峰值加速度：{Plan.StageMaxAcceleration:F0} mm/s²";
-        DrillingInfo += "\n✅ 仿真已准备，点击“开始仿真”";
-        SceneChanged?.Invoke();
     }
 
     /// <summary>孔径统计摘要：按孔数降序，最多列出 5 种孔径</summary>

@@ -339,7 +339,8 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "请先执行路径分解。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        if (_vm.Sim != null && _vm.Sim.Done) _vm.RebuildSimulator();
+        if (_vm.Sim != null && _vm.Sim.Done) 
+            _vm.RebuildSimulator();
         _vm.IsRunning = !_vm.IsRunning;
     }
 

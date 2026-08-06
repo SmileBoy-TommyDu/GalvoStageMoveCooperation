@@ -135,8 +135,8 @@ public static class DxfParser
             // 钻孔数据
             holes.Add(new Geometry.Drilling.DrillingPattern.Hole(
                 cx, cy, radius * 2, layer, holes.Count));
-            // 折线数据（细分为闭合多段线，与 AddCircle 保持一致）
-            var pl = new PathPolyline { Closed = true, Layer = layer };
+            // 折线数据（细分为闭合多段线，与 AddCircle 保持一致）；FromCircle 标记供双模式排除重复加工
+            var pl = new PathPolyline { Closed = true, Layer = layer, FromCircle = true };
             TessellateArc(pl.Points, new Vec2(cx, cy), radius, 0, Math.PI * 2, false);
             polylines.Add(pl);
         }
