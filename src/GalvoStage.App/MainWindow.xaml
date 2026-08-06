@@ -200,6 +200,9 @@
                                     <Button x:Name="BtnExportGCode" Content="导出 G 代码…" Click="OnExportGCodeClick"
                                             Style="{StaticResource RoundButton}" Background="#3F7A5E"/>
                                 </StackPanel>
+                                <CheckBox Content="工艺效果优先（同孔径全幅面一次加工完）" IsChecked="{Binding DrillQualityFirst}"
+                                          Margin="0,6,0,0"
+                                          ToolTipService.ToolTip="勾选：按孔径分组，同一种孔径全幅面加工完再换下一种（工艺一致性优）；不勾：纯分区+TSP，加工时间最短"/>
                             </StackPanel>
                         </Border>
 

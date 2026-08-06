@@ -5,6 +5,15 @@ using GalvoStage.Core.Geometry.Drilling;
 
 namespace GalvoStage.Core.Drilling;
 
+/// <summary>钻孔加工策略（影响孔位访问顺序）</summary>
+public enum DrillingStrategy
+{
+    /// <summary>加工时间最短：纯空间分区 + 分区内 TSP，忽略孔径分组（默认）。</summary>
+    TimeOptimal,
+    /// <summary>工艺效果优先：按孔径分组，同一种孔径全幅面一次加工完，再加工下一种孔径（组内仍按分区+TSP）。</summary>
+    QualityOptimal
+}
+
 /// <summary>
 /// PCB 钻孔路径规划器
 /// 将孔位列表优化为最短加工路径（网格加速最近邻排序）
@@ -48,18 +57,18 @@ public static class DrillPlanner
     /// <param name="jumpSpeedPlatform">平台空移速度 (mm/s)，用于采样</param>
     /// <param name="jumpSpeedGalvo">振镜空移速度 (mm/s)，用于采样</param>
     /// <param name="sampleRate">采样频率 (Hz)</param>
+    /// <param name="strategy">加工策略：TimeOptimal（时间最短，默认）或 QualityOptimal（工艺优先，按孔径分组）</param>
     public static DrillingTrajectory Plan(Geometry.Drilling.DrillingPattern pattern,
         double dwellTimeMs = 50.0, double galvoFov = 5.0, bool galvoFirst = false,
-        double jumpSpeedPlatform = 500.0, double jumpSpeedGalvo = 2000.0, double sampleRate = 1000.0)
+        double jumpSpeedPlatform = 500.0, double jumpSpeedGalvo = 2000.0, double sampleRate = 1000.0,
+        DrillingStrategy strategy = DrillingStrategy.TimeOptimal)
     {
         if (pattern.Holes.Count == 0)
             return new DrillingTrajectory();
 
-        var ordered = galvoFirst
-            ? PlanGalvoFirst(pattern.Holes, galvoFov)
-            : pattern.Holes.Count > MaxPointsPerZone
-                ? OrderByZonal(pattern.Holes, MaxPointsPerZone)
-                : OrderByNearestGrid(pattern.Holes);
+        var ordered = strategy == DrillingStrategy.QualityOptimal
+            ? OrderByDiameterGroups(pattern.Holes, galvoFov, galvoFirst)
+            : OrderHoles(pattern.Holes, galvoFov, galvoFirst);
 
         var trajectory = new DrillingTrajectory();
         for (int i = 0; i < ordered.Count; i++)
@@ -85,6 +94,47 @@ public static class DrillPlanner
     }
 
     private const int MaxPointsPerZone = 5_000;
+
+    /// <summary>根据数据规模与振镜优先开关选择排序策略（分区 + 分区内 TSP）。</summary>
+    private static List<Geometry.Drilling.DrillingPattern.Hole> OrderHoles(
+        List<Geometry.Drilling.DrillingPattern.Hole> holes, double galvoFov, bool galvoFirst)
+    {
+        return galvoFirst
+            ? PlanGalvoFirst(holes, galvoFov)
+            : holes.Count > MaxPointsPerZone
+                ? OrderByZonal(holes, MaxPointsPerZone)
+                : OrderByNearestGrid(holes);
+    }
+
+    /// <summary>
+    /// 工艺优先：按孔径分组，同一种孔径全幅面一次加工完，再加工下一种孔径。
+    /// 孔径按升序加工（量化到 0.001mm 容忍浮点误差）；每个孔径组内部仍按分区+TSP 优化。
+    /// </summary>
+    private static List<Geometry.Drilling.DrillingPattern.Hole> OrderByDiameterGroups(
+        List<Geometry.Drilling.DrillingPattern.Hole> holes, double galvoFov, bool galvoFirst)
+    {
+        if (holes.Count <= 1) return new List<Geometry.Drilling.DrillingPattern.Hole>(holes);
+
+        var groups = new SortedDictionary<double, List<Geometry.Drilling.DrillingPattern.Hole>>();
+        foreach (var h in holes)
+        {
+            double key = Math.Round(h.Diameter, 3);
+            if (!groups.TryGetValue(key, out var list))
+            {
+                list = new List<Geometry.Drilling.DrillingPattern.Hole>();
+                groups[key] = list;
+            }
+            list.Add(h);
+        }
+
+        // 单一孔径：等价于 TimeOptimal，直接走分区+TSP
+        if (groups.Count <= 1) return OrderHoles(holes, galvoFov, galvoFirst);
+
+        var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(holes.Count);
+        foreach (var kv in groups)  // SortedDictionary → 孔径升序
+            ordered.AddRange(OrderHoles(kv.Value, galvoFov, galvoFirst));
+        return ordered;
+    }
 
     /// <summary>
     /// 振镜优先路径规划（大数据场景核心优化）。
@@ -178,36 +228,94 @@ public static class DrillPlanner
         // 5. 按簇质心莫顿码排序（O(K log K)），保证相邻簇在空间上相邻
         var clusterOrder = OrderClustersByMorton(clusterCx, clusterCy, dimX, dimY);
 
-        // 6. 簇内按最近邻排序，拼接成最终序列
+        // 6. 簇内先最近邻贪心生成初始路径，再用 2-opt 局部优化（TSP），拼接成最终序列
         var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(n);
         foreach (int ci in clusterOrder)
         {
             var members = clusterMembers[ci];
-            // 从簇中心出发，贪心走最近未访问孔
-            double px = clusterCx[ci], py = clusterCy[ci];
-            var usedInCluster = new bool[members.Count];
-            for (int step = 0; step < members.Count; step++)
-            {
-                int bestIdx = -1;
-                double bestD2 = double.MaxValue;
-                for (int j = 0; j < members.Count; j++)
-                {
-                    if (usedInCluster[j]) continue;
-                    int idx = members[j];
-                    double dx = holes[idx].X - px;
-                    double dy = holes[idx].Y - py;
-                    double d2 = dx * dx + dy * dy;
-                    if (d2 < bestD2) { bestD2 = d2; bestIdx = j; }
-                }
-                usedInCluster[bestIdx] = true;
-                ordered.Add(holes[members[bestIdx]]);
-                px = holes[members[bestIdx]].X;
-                py = holes[members[bestIdx]].Y;
-            }
+            // 从簇中心出发，贪心走最近未访问孔，得到初始开路径
+            var tour = NearestNeighborInCluster(holes, members, clusterCx[ci], clusterCy[ci]);
+            // 簇内孔数不超阀值时用 2-opt 优化（簇受 FOV 约束，通常规模很小）
+            if (tour.Count <= TwoOptMaxCluster)
+                TwoOptImprove(holes, tour);
+            foreach (int idx in tour)
+                ordered.Add(holes[idx]);
         }
 
         return ordered;
     }
+
+    /// <summary>簇内最近邻贪心排序，返回孔索引的访问顺序（开路径）。</summary>
+    private static List<int> NearestNeighborInCluster(
+        List<Geometry.Drilling.DrillingPattern.Hole> holes, List<int> members, double startX, double startY)
+    {
+        int m = members.Count;
+        var tour = new List<int>(m);
+        var used = new bool[m];
+        double px = startX, py = startY;
+        for (int step = 0; step < m; step++)
+        {
+            int bestJ = -1;
+            double bestD2 = double.MaxValue;
+            for (int j = 0; j < m; j++)
+            {
+                if (used[j]) continue;
+                int idx = members[j];
+                double dx = holes[idx].X - px, dy = holes[idx].Y - py;
+                double d2 = dx * dx + dy * dy;
+                if (d2 < bestD2) { bestD2 = d2; bestJ = j; }
+            }
+            used[bestJ] = true;
+            tour.Add(members[bestJ]);
+            px = holes[members[bestJ]].X;
+            py = holes[members[bestJ]].Y;
+        }
+        return tour;
+    }
+
+    /// <summary>2-opt 局部搜索优化开路径 TSP（原地翻转 tour）。仅对小规模簇调用。</summary>
+    private static void TwoOptImprove(List<Geometry.Drilling.DrillingPattern.Hole> holes, List<int> tour)
+    {
+        int m = tour.Count;
+        if (m < 4) return;
+        bool improved = true;
+        int maxPasses = 20;
+        while (improved && maxPasses-- > 0)
+        {
+            improved = false;
+            for (int i = 0; i < m - 1; i++)
+            {
+                for (int k = i + 2; k < m; k++)
+                {
+                    int a = tour[i], b = tour[i + 1];
+                    int c = tour[k];
+                    // 开路径：(c,d) 边仅当 k+1 < m 时存在
+                    double before = Dist(holes, a, b);
+                    double after = Dist(holes, a, c);
+                    if (k + 1 < m)
+                    {
+                        int d = tour[k + 1];
+                        before += Dist(holes, c, d);
+                        after += Dist(holes, b, d);
+                    }
+                    if (after + 1e-9 < before)
+                    {
+                        tour.Reverse(i + 1, k - i);
+                        improved = true;
+                    }
+                }
+            }
+        }
+    }
+
+    private static double Dist(List<Geometry.Drilling.DrillingPattern.Hole> holes, int a, int b)
+    {
+        double dx = holes[a].X - holes[b].X, dy = holes[a].Y - holes[b].Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    /// <summary>簇内 2-opt 优化的孔数上限（超过此数量仅用最近邻，避免 O(m²) 性能问题）。</summary>
+    private const int TwoOptMaxCluster = 300;
 
     /// <summary>按簇质心的莫顿码排序，返回簇索引的访问顺序</summary>
     private static int[] OrderClustersByMorton(double[] cx, double[] cy, int dimX, int dimY)
