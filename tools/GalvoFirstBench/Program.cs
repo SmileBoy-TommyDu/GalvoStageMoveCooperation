@@ -8,7 +8,6 @@ using GalvoStage.Core.Drilling;
 using GalvoStage.Core.Geometry;
 
 const double GalvoFov = 5.0;   // mm, matches MainViewModel default
-const double DwellMs = 50.0;
 
 // Locate bench DXF files relative to this executable's source tree
 var samplesDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..",
@@ -54,13 +53,13 @@ foreach (var (fname, desc) in files)
 
     // Strategy A: Z-order (legacy) — use Plan with galvoFirst=false
     var swA = Stopwatch.StartNew();
-    var trajZ = DrillPlanner.Plan(pattern, DwellMs, GalvoFov, galvoFirst: false);
+    var trajZ = DrillPlanner.Plan(pattern, GalvoFov, galvoFirst: false);
     swA.Stop();
     double zPlatDist = TotalDistance(trajZ);
 
     // Strategy B: galvo-first — cluster by 2*FOV grid, Morton-ordered clusters, NN within
     var swB = Stopwatch.StartNew();
-    var trajGF = DrillPlanner.Plan(pattern, DwellMs, GalvoFov, galvoFirst: true);
+    var trajGF = DrillPlanner.Plan(pattern, GalvoFov, galvoFirst: true);
     swB.Stop();
 
     // Under galvo-first, platform moves only at cluster boundaries.

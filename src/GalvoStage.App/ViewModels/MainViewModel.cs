@@ -461,10 +461,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 h.RecomputeProcessParams();
                 holes[i] = h;
             }
-            DrillingTrajectory = DrillPlanner.Plan(DrillingPattern, dwellTimeMs: 50.0,
+            DrillingTrajectory = DrillPlanner.Plan(DrillingPattern,
                 galvoFov: GalvoFov, galvoFirst: true,
-                jumpSpeedPlatform: JumpSpeedPlatform, jumpSpeedGalvo: JumpSpeedGalvo,
-                sampleRate: SampleRate,
                 strategy: DrillQualityFirst ? DrillingStrategy.QualityOptimal : DrillingStrategy.TimeOptimal);
             TrepanAnimationFrames = TrepanAnimationGenerator.GenerateAnimationFrames(
                 DrillingPattern, samplesPerRing: 36);
@@ -497,16 +495,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         RebuildSimulator();
 
+        // 逐孔动力学预检（双模式下也执行，避免合并路径绕过 DecomposeDrilling 丢失告警）
+        string precheck = PrecheckDrillDynamics(DrillingTrajectory.Moves);
+        string precheckLine = precheck.Length > 0 ? precheck : "逐孔预检：✅ 全部孔径在当前进给下可行\n";
+
         string fovState = Plan.MaxGalvoDeviation <= GalvoFov ? "√ 在视场内" : "× 超出视场!";
         PlanInfo =
             dnote +
+            precheckLine +
             $"【双模式加工】轮廓 {contourPolys.Count:N0} 条 + 钻孔 {DrillingTrajectory.Moves.Count:N0} 个\n" +
             $"折线采样 {trajP.Count:N0} 点 + 钻孔采样 {trajD.Count:N0} 点 = 合计 {combined.Count:N0} 点   时长：{combined.Duration:F1} s\n" +
             $"钻孔方式（全量）：环切 {trepanCount:N0} 孔 / 点钻 {pointCount:N0} 孔\n" +
             $"截止频率：{Plan.CutoffHz:F2} Hz\n" +
             $"振镜最大偏摆：{Plan.MaxGalvoDeviation:F3} mm ({fovState})\n" +
             $"平台峰值速度：{Plan.StageMaxVelocity:F1} mm/s   峰值加速度：{Plan.StageMaxAcceleration:F0} mm/s²";
-        DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 双模式已规划（折线+钻孔一并仿真）";
+        DrillingInfo = $"已导入 {DrillingPattern.Holes.Count:N0} 个孔 → 双模式已规划（折线+钻孔一并仿真）\n" +
+            $"钻孔方式（全量）：环切 {trepanCount:N0} 孔 / 点钻 {pointCount:N0} 孔\n" +
+            $"{precheckLine}" +
+            $@"✅ 仿真已准备，点击""开始仿真""";
         SceneChanged?.Invoke();
     }
 
@@ -707,7 +713,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
     
     /// <summary>生成优化钻孔路径（异步版本，用于大文件）</summary>
-    public async Task PlanDrillingPathAsync(double dwellTimeMs = 50.0)
+    public async Task PlanDrillingPathAsync()
     {
         if (DrillingPattern == null || DrillingPattern.Holes.Count == 0) 
         {
@@ -725,7 +731,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // 振镜优先策略（galvoFirst=true）：以 2·FOV 为网格尺寸将孔聚类到簇，簇内全走振镜，
             // 仅簇间才动平台。百万孔 → 几千个簇 → 平台动几千次（而非百万次），大幅节约加工时间。
             // 仿真阶段（DecomposeDrilling）已改为全量仿真，所有孔都参与轨迹回放。
-            DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs, GalvoFov, galvoFirst: true,
+            DrillingTrajectory = DrillPlanner.Plan(pattern, galvoFov: GalvoFov, galvoFirst: true,
                 strategy: DrillQualityFirst ? DrillingStrategy.QualityOptimal : DrillingStrategy.TimeOptimal);
             DrillingInfo = $"✅ 路径规划完成！（振镜优先）\n孔数：{DrillingTrajectory!.HoleCount:N0}（全量，无丢弃）\n" +
                           $"预计加工时长：{DrillingTrajectory.TotalDurationMs / 1000:F1} s\n" +
@@ -734,19 +740,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         
         SceneChanged?.Invoke();
     }
-    
-    /// <summary>生成优化钻孔路径</summary>
-    public void PlanDrillingPath(double dwellTimeMs = 50.0)
-    {
-        if (DrillingPattern == null || DrillingPattern.Holes.Count == 0) return;
-        
-        var pattern = DrillingPattern;
-        // 振镜优先策略：簇内全走振镜，仅簇间动平台
-        DrillingTrajectory = DrillPlanner.Plan(pattern, dwellTimeMs, GalvoFov, galvoFirst: true,
-            strategy: DrillQualityFirst ? DrillingStrategy.QualityOptimal : DrillingStrategy.TimeOptimal);
-        PlanInfo = $"孔数：{DrillingTrajectory.HoleCount:N0}\n{DrillingTrajectory}";
-        SceneChanged?.Invoke();
-    }
+   
     
     private static string FormatLayersForDrilling(IReadOnlyDictionary<string, int> layerCounts)
     {

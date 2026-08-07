@@ -26,7 +26,7 @@ public static class ZOrderBenchmark
             double rawLen = PathLength(pattern.Holes);
 
             var sw = Stopwatch.StartNew();
-            var traj = DrillPlanner.Plan(pattern, dwellTimeMs: 50.0);
+            var traj = DrillPlanner.Plan(pattern);
             sw.Stop();
 
             double orderedLen = TrajectoryLength(traj);

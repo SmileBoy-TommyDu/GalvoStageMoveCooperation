@@ -29,10 +29,10 @@ public static class DrillPlanner
         public double DwellTimeMs; // 停留时间 (ms)
         public double Diameter;    // 孔径 (mm)，0 表示未知
         public string Layer;       // 来源图层
-        
+
         /// <summary>工艺参数（按孔径分档配置）</summary>
         public TrepanParams ProcessParams { get; set; }
-        
+
         public override string ToString() => $"({Position.X:F3},{Position.Y:F3})";
     }
 
@@ -42,25 +42,17 @@ public static class DrillPlanner
         public List<HoleMove> Moves { get; } = new();
         public int HoleCount => Moves.Count;
         public double TotalDurationMs => Moves.Count * 50; // 简化估算：每孔 50ms
-        
-        /// <summary>采样后的轨迹（用于激光控制）</summary>
-        public Core.PathPlanning.SampledTrajectory? SampledTrajectory { get; set; }
-        
-        public override string ToString() => $"{HoleCount:N0} 孔，~{(TotalDurationMs/1000):.0}s";
+
+        public override string ToString() => $"{HoleCount:N0} 孔，~{(TotalDurationMs / 1000):.0}s";
     }
 
     /// <summary>生成优化后的钻孔路径</summary>
     /// <param name="pattern">钻孔点集</param>
-    /// <param name="dwellTimeMs">单孔停留时间 (ms)</param>
     /// <param name="galvoFov">振镜半视场 (mm)，用于振镜优先聚类的网格尺寸；&lt;=0 时退化为纯路径最短</param>
     /// <param name="galvoFirst">振镜优先策略：按振镜视场网格聚类，簇内全走振镜，仅簇间才动平台——大幅减少平台跳跃次数</param>
-    /// <param name="jumpSpeedPlatform">平台空移速度 (mm/s)，用于采样</param>
-    /// <param name="jumpSpeedGalvo">振镜空移速度 (mm/s)，用于采样</param>
-    /// <param name="sampleRate">采样频率 (Hz)</param>
     /// <param name="strategy">加工策略：TimeOptimal（时间最短，默认）或 QualityOptimal（工艺优先，按孔径分组）</param>
     public static DrillingTrajectory Plan(Geometry.Drilling.DrillingPattern pattern,
-        double dwellTimeMs = 50.0, double galvoFov = 5.0, bool galvoFirst = false,
-        double jumpSpeedPlatform = 500.0, double jumpSpeedGalvo = 2000.0, double sampleRate = 1000.0,
+        double galvoFov = 5.0, bool galvoFirst = false,
         DrillingStrategy strategy = DrillingStrategy.TimeOptimal)
     {
         if (pattern.Holes.Count == 0)
@@ -74,21 +66,22 @@ public static class DrillPlanner
         for (int i = 0; i < ordered.Count; i++)
         {
             var h = ordered[i];
+            // 单孔停留时间按孔径分档取工艺参数的 HoldTime（微孔 20 / 中孔 30 / 大孔 40 / 特大孔 50ms），
+            // 替代此前对所有孔固定 dwellTimeMs 的做法：小孔不再过烧，大孔保留更长加工量。
+            // 上游未计算 ProcessParams 时按孔径回退（孔径未知取中孔），确保 DwellTimeMs 恒等于该档 HoldTime。
+            var pp = h.ProcessParams
+                ?? (h.Diameter > 0 ? TrepanParams.CreateForDiameter(h.Diameter) : TrepanParams.MediumHole);
             trajectory.Moves.Add(new HoleMove
             {
                 Position = new Vec2(h.X, h.Y),
                 IsRapid = i == 0,
                 IsDrilling = true,
-                DwellTimeMs = dwellTimeMs,
+                DwellTimeMs = pp.HoldTime,
                 Diameter = h.Diameter,
                 Layer = h.Layer,
-                ProcessParams = h.ProcessParams
+                ProcessParams = pp
             });
         }
-        
-        // 生成采样轨迹（用于激光控制）
-        trajectory.SampledTrajectory = SampleDrillingTrajectory(
-            trajectory.Moves, jumpSpeedPlatform, jumpSpeedGalvo, sampleRate, dwellTimeMs);
 
         return trajectory;
     }
@@ -349,87 +342,6 @@ public static class DrillPlanner
         }
         return result;
     }
-    
-    /// <summary>将钻孔移动序列转换为采样轨迹（确保孔间移动激光关闭）</summary>
-    private static Core.PathPlanning.SampledTrajectory SampleDrillingTrajectory(
-        List<HoleMove> moves, double jumpSpeedPlatform, double jumpSpeedGalvo, 
-        double sampleRate, double dwellTimeMs)
-    {
-        if (moves.Count == 0) return new Core.PathPlanning.SampledTrajectory();
-        
-        var xs = new List<double>(1 << 16);
-        var ys = new List<double>(1 << 16);
-        var laser = new List<bool>(1 << 16);
-        
-        double dt = 1.0 / sampleRate;
-        double rapidSpeed = Math.Min(
-            Math.Sqrt(jumpSpeedPlatform * jumpSpeedPlatform + jumpSpeedGalvo * jumpSpeedGalvo),
-            1000.0);  // 限制最大 1000 mm/s
-        double step = rapidSpeed * dt;
-        
-        Vec2 cur = moves[0].Position;
-        
-        for (int i = 0; i < moves.Count; i++)
-        {
-            var move = moves[i];
-            
-            // 1. 空程移动到孔位（激光关闭）
-            if (i > 0)
-            {
-                // 空程前：确保激光关闭
-                if (xs.Count == 0 || xs[^1] != cur.X || ys[^1] != cur.Y)
-                {
-                    xs.Add(cur.X);
-                    ys.Add(cur.Y);
-                    laser.Add(false);
-                }
-                
-                // 空程移动到目标孔位
-                double len = cur.DistanceTo(move.Position);
-                if (len > 1e-12)
-                {
-                    double s = step;
-                    while (s < len)
-                    {
-                        double t = s / len;
-                        xs.Add(cur.X + (move.Position.X - cur.X) * t);
-                        ys.Add(cur.Y + (move.Position.Y - cur.Y) * t);
-                        laser.Add(false);  // 空程激光关闭
-                        s += step;
-                    }
-                }
-                
-                // 空程结束：确保激光关闭
-                if (xs.Count == 0 || xs[^1] != move.Position.X || ys[^1] != move.Position.Y)
-                {
-                    xs.Add(move.Position.X);
-                    ys.Add(move.Position.Y);
-                    laser.Add(false);
-                }
-            }
-            
-            // 2. 钻孔位置（激光开启，停留）
-            int dwellSamples = (int)(dwellTimeMs / 1000.0 / dt);
-            dwellSamples = Math.Max(dwellSamples, 1);  // 至少 1 个采样点
-            
-            for (int j = 0; j < dwellSamples; j++)
-            {
-                xs.Add(move.Position.X);
-                ys.Add(move.Position.Y);
-                laser.Add(true);  // 钻孔激光开启
-            }
-            
-            cur = move.Position;
-        }
-        
-        return new Core.PathPlanning.SampledTrajectory
-        {
-            SampleRate = sampleRate,
-            X = xs.ToArray(),
-            Y = ys.ToArray(),
-            LaserOn = laser.ToArray()
-        };
-    }
 
     /// <summary>Z-order 曲线（莫顿码）分区排序（用于超大规模数据）</summary>
     /// <param name="holes">输入孔位列表</param>
@@ -439,7 +351,7 @@ public static class DrillPlanner
     {
         int n = holes.Count;
         if (n <= 1) return new List<Geometry.Drilling.DrillingPattern.Hole>(holes);
-        
+
         // 1. 计算全局包围盒
         double minX = double.MaxValue, minY = double.MaxValue;
         double maxX = double.MinValue, maxY = double.MinValue;
@@ -450,15 +362,15 @@ public static class DrillPlanner
             if (h.X > maxX) maxX = h.X;
             if (h.Y > maxY) maxY = h.Y;
         }
-        
+
         double width = Math.Max(maxX - minX, 1e-9);
         double height = Math.Max(maxY - minY, 1e-9);
-        
+
         // 2. 确定网格分辨率（方形网格）
         int dim = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(n)));
         double cw = width / dim;
         double ch = height / dim;
-        
+
         // 3. 计算莫顿码并分配单元格
         var coded = new MortonCode[n];
         for (int i = 0; i < n; i++)
@@ -467,22 +379,22 @@ public static class DrillPlanner
             int cy = (int)((holes[i].Y - minY) / ch);
             cx = Math.Clamp(cx, 0, dim - 1);
             cy = Math.Clamp(cy, 0, dim - 1);
-            
+
             uint cellIndex = EncodeMortonCode(cx, cy, dim);
             coded[i] = new MortonCode { OriginalIndex = i, Code = cellIndex, CellX = cx, CellY = cy };
         }
-        
+
         // 4. 按莫顿码排序（使用快速排序）
         Array.Sort(coded, (a, b) => a.Code.CompareTo(b.Code));
-        
+
         // 5. 重建有序列表
         var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(n);
         for (int i = 0; i < n; i++)
             ordered.Add(holes[coded[i].OriginalIndex]);
-        
+
         return ordered;
     }
-    
+
     /// <summary>二阶莫顿码（Z-order）编码</summary>
     /// <param name="x">单元格 X 坐标</param>
     /// <param name="y">单元格 Y 坐标</param>
@@ -498,17 +410,17 @@ public static class DrillPlanner
             bits++;
             temp >>= 1;
         }
-        
+
         uint result = 0;
         for (int i = 0; i < bits; i++)
         {
-            result |= ((uint)(x & (1 << i)) << (2 * i)) | 
+            result |= ((uint)(x & (1 << i)) << (2 * i)) |
                       ((uint)(y & (1 << i)) << (2 * i + 1));
         }
-        
+
         return result;
     }
-    
+
     /// <summary>莫顿码数据结构</summary>
     private sealed class MortonCode
     {
@@ -523,21 +435,21 @@ public static class DrillPlanner
     {
         int n = holes.Count;
         if (n <= 1) return holes;
-        
+
         // 端点表（每个点就是一个"端点"，闭合性不适用）
         var ex = new List<double>(n);
         var ey = new List<double>(n);
         var epoly = new List<int>(n); // 索引到 holes
-        
+
         for (int i = 0; i < n; i++)
         {
             ex.Add(holes[i].X);
             ey.Add(holes[i].Y);
             epoly.Add(i);
         }
-        
+
         int m = ex.Count;
-        
+
         // 全局包围盒 → 均匀网格
         double minX = double.MaxValue, minY = double.MaxValue;
         double maxX = double.MinValue, maxY = double.MinValue;
@@ -548,11 +460,11 @@ public static class DrillPlanner
             if (ey[k] < minY) minY = ey[k];
             if (ey[k] > maxY) maxY = ey[k];
         }
-        
+
         int dim = Math.Max(1, (int)Math.Sqrt(m));
         double cw = Math.Max((maxX - minX) / dim, 1e-9);
         double ch = Math.Max((maxY - minY) / dim, 1e-9);
-        
+
         // 计数排序建桶
         var starts = new int[dim * dim + 1];
         var cellOf = new int[m];
@@ -568,20 +480,20 @@ public static class DrillPlanner
         var items = new int[m];
         var fill = (int[])starts.Clone();
         for (int k = 0; k < m; k++) items[fill[cellOf[k]]++] = k;
-        
+
         var used = new bool[n];      // 孔级懒删除
         var ordered = new List<Geometry.Drilling.DrillingPattern.Hole>(n);
         double px = minX;             // 从最小 x 开始（避免从零原点出发造成第一次大空程）
         double py = minY;
         double minCell = Math.Min(cw, ch);
-        
+
         for (int step = 0; step < n; step++)
         {
             int ccx = Math.Clamp((int)((px - minX) / cw), 0, dim - 1);
             int ccy = Math.Clamp((int)((py - minY) / ch), 0, dim - 1);
             int best = -1;
             double bestD2 = double.MaxValue;
-            
+
             for (int r = 0; r <= 2 * dim; r++)
             {
                 if (best >= 0 && r > 0)
@@ -589,7 +501,7 @@ public static class DrillPlanner
                     double ringMin = (r - 1) * minCell;
                     if (ringMin > 0 && ringMin * ringMin > bestD2) break;
                 }
-                
+
                 int xlo = ccx - r, xhi = ccx + r, ylo = ccy - r, yhi = ccy + r;
                 for (int cy = Math.Max(ylo, 0); cy <= Math.Min(yhi, dim - 1); cy++)
                 {
@@ -597,13 +509,13 @@ public static class DrillPlanner
                     for (int cx = Math.Max(xlo, 0); cx <= Math.Min(xhi, dim - 1); cx++)
                     {
                         if (!edgeRow && cx != xlo && cx != xhi) continue;
-                        
+
                         int cell = cy * dim + cx;
                         for (int t = starts[cell]; t < starts[cell + 1]; t++)
                         {
                             int k = items[t];
                             if (used[k]) continue;
-                            
+
                             double dx = ex[k] - px, dy = ey[k] - py;
                             double d2 = dx * dx + dy * dy;
                             if (d2 < bestD2)
@@ -614,12 +526,12 @@ public static class DrillPlanner
                         }
                     }
                 }
-                
+
                 if (r >= dim && best >= 0) break;
             }
-            
+
             if (best < 0) break;
-            
+
             int pi = epoly[best];
             used[pi] = true;
             var pick = holes[pi];
@@ -627,7 +539,7 @@ public static class DrillPlanner
             px = pick.X;
             py = pick.Y;
         }
-        
+
         return ordered;
     }
 }

@@ -89,7 +89,7 @@ namespace DrillingTest
                     
                     Console.WriteLine("⚙️ 正在规划路径...");
                     var traceSw = System.Diagnostics.Stopwatch.StartNew();
-                    var trajectory = DrillPlanner.Plan(samplePattern, dwellTimeMs: 50.0);
+                    var trajectory = DrillPlanner.Plan(samplePattern);
                     traceSw.Stop();
                                         
                     Console.WriteLine($"\n✅ 路径规划完成!");
