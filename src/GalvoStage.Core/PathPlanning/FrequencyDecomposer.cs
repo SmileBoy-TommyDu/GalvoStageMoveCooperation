@@ -15,7 +15,16 @@ public sealed class DecomposeResult
     public double MaxGalvoDeviation { get; init; }   // 振镜最大偏摆 (mm)
     public double StageMaxVelocity { get; init; }    // mm/s
     public double StageMaxAcceleration { get; init; }// mm/s^2
+    public double GalvoMaxVelocity { get; init; }    // 振镜最大速度 (mm/s)
+    public double GalvoMaxAcceleration { get; init; }// 振镜最大加速度 (mm/s^2)
     public int Count => StageX.Length;
+
+    // 多约束可行性标志（由 DecomposeAuto 多约束版本填充）
+    public bool Feasible { get; set; }                          // 四约束是否全部满足
+    public bool FovConstraintSatisfied { get; set; }            // 振镜 FOV 约束
+    public bool StageVelocityConstraintSatisfied { get; set; }  // 平台速度约束
+    public bool StageAccelConstraintSatisfied { get; set; }     // 平台加速度约束
+    public bool GalvoVelocityConstraintSatisfied { get; set; }  // 振镜速度约束
 
     /// <summary>振镜典型最大速度 (mm/s)。振镜是谐振扫描头，速度远高于平台（典型 500-5000 mm/s）。</summary>
     public const double DefaultGalvoMaxSpeed = 2000.0;
@@ -173,6 +182,7 @@ public static class FrequencyDecomposer
         }
 
         (double vMax, double aMax) = KinematicStats(stageX, stageY, fs);
+        (double gVMax, double gAMax) = KinematicStats(galvoX, galvoY, fs);
 
         return new DecomposeResult
         {
@@ -182,35 +192,153 @@ public static class FrequencyDecomposer
             CutoffHz = cutoffHz,
             MaxGalvoDeviation = maxDev,
             StageMaxVelocity = vMax,
-            StageMaxAcceleration = aMax
+            StageMaxAcceleration = aMax,
+            GalvoMaxVelocity = gVMax,
+            GalvoMaxAcceleration = gAMax
         };
     }
 
     /// <summary>
-    /// 自动搜索截止频率：二分查找满足 maxDev &lt;= fov * margin 的最低截止频率。
-    /// 截止频率越低 → 平台越平滑（加速度小），但振镜残差越大。
+    /// 向后兼容重载：仅以振镜 FOV 为约束搜索截止频率（旧行为）。
+    /// 新代码建议使用多约束版本 <see cref="DecomposeAuto(SampledTrajectory, double, double, double, double, double, double)"/>。
     /// </summary>
     public static DecomposeResult DecomposeAuto(SampledTrajectory traj, double galvoFov,
         double margin = 0.8, double fcLow = 0.2, double fcHigh = 60)
     {
+        // 旧行为：仅约束振镜 FOV，平台/振镜速度加速度用宽松默认值
+        return DecomposeAuto(traj, galvoFov,
+            stageMaxSpeed: 10_000, stageMaxAccel: 100_000, galvoMaxSpeed: 10_000,
+            margin, fcLow, fcHigh);
+    }
+
+    /// <summary>
+    /// 多约束可行性搜索截止频率（方案 2）。
+    ///
+    /// 约束（全部关于 fc 单调）：
+    ///   1. maxDev(fc) &lt;= galvoFov × margin            （振镜 FOV，↑ fc → ↑ maxDev → 给出 fc ≥ fcMin）
+    ///   2. StageMaxVelocity(fc) &lt;= stageMaxSpeed       （平台速度，↑ fc → ↑ vStage → 给出 fc ≤ fcMaxV）
+    ///   3. StageMaxAcceleration(fc) &lt;= stageMaxAccel   （平台加速度，↑ fc → ↑ aStage → 给出 fc ≤ fcMaxA）
+    ///   4. GalvoMaxVelocity(fc) &lt;= galvoMaxSpeed       （振镜速度，↑ fc → ↓ vGalvo → 给出 fc ≥ fcMinG）
+    ///
+    /// 可行域：[fcMin, fcMax] = [max(fcMin_FOV, fcMin_GalvoV), min(fcMax_StageV, fcMax_StageA)]
+    /// 目标：minimize fc（让平台尽可能平滑）→ 取可行域下界。
+    /// </summary>
+    public static DecomposeResult DecomposeAuto(SampledTrajectory traj, double galvoFov,
+        double stageMaxSpeed, double stageMaxAccel, double galvoMaxSpeed,
+        double margin = 0.8, double fcLow = 0.2, double fcHigh = 60)
+    {
+        double fs = traj.SampleRate;
         double limit = galvoFov * margin;
-        fcHigh = Math.Min(fcHigh, traj.SampleRate * 0.45);
+        double searchHigh = Math.Min(fcHigh, fs * 0.45);
+        double searchLow = Math.Max(fcLow, 0.01);
 
-        var high = Decompose(traj, fcHigh, galvoFov);
-        if (high.MaxGalvoDeviation > limit) return high;   // 上限仍超视场，返回最优可行
+        // 1) 计算各约束给出的 fc 边界
+        double fcMinFov = ComputeFcMin(traj, limit, searchLow, searchHigh);
+        double fcMinGalvo = ComputeFcMinGalvoV(traj, galvoMaxSpeed, searchLow, searchHigh);
+        double fcMaxStageV = ComputeFcMaxStageV(traj, stageMaxSpeed, searchLow, searchHigh);
+        double fcMaxStageA = ComputeFcMaxStageA(traj, stageMaxAccel, searchLow, searchHigh);
 
-        var low = Decompose(traj, fcLow, galvoFov);
-        if (low.MaxGalvoDeviation <= limit) return low;
+        // 2) 可行域
+        double fcMin = Math.Max(fcMinFov, fcMinGalvo);
+        double fcMax = Math.Min(fcMaxStageV, fcMaxStageA);
+        fcMin = Math.Clamp(fcMin, searchLow, searchHigh);
+        fcMax = Math.Clamp(fcMax, searchLow, searchHigh);
 
-        DecomposeResult best = high;
-        for (int iter = 0; iter < 18 && (fcHigh - fcLow) > 0.05; iter++)
+        // 3) 选择候选 fc（优先可行域下界 = 最平滑平台）
+        bool feasible = fcMin <= fcMax;
+        double fcCandidate = feasible ? fcMin : 0.5 * (fcMin + fcMax);
+        fcCandidate = Math.Clamp(fcCandidate, searchLow, searchHigh);
+
+        var result = Decompose(traj, fcCandidate, galvoFov);
+
+        // 4) 四约束校验标志（即便不可行也返回结果，调用方可通过属性自查）
+        result.Feasible = feasible;
+        result.FovConstraintSatisfied = result.MaxGalvoDeviation <= limit;
+        result.StageVelocityConstraintSatisfied = result.StageMaxVelocity <= stageMaxSpeed;
+        result.StageAccelConstraintSatisfied = result.StageMaxAcceleration <= stageMaxAccel;
+        result.GalvoVelocityConstraintSatisfied = result.GalvoMaxVelocity <= galvoMaxSpeed;
+
+        return result;
+    }
+
+    /// <summary>二分搜索满足 maxDev(fc) &lt;= limit 的最小 fc（振镜 FOV 约束下界）。</summary>
+    private static double ComputeFcMin(SampledTrajectory traj, double limit,
+        double searchLow, double searchHigh)
+    {
+        var low = Decompose(traj, searchLow, double.PositiveInfinity);
+        if (low.MaxGalvoDeviation <= limit) return searchLow;
+        var high = Decompose(traj, searchHigh, double.PositiveInfinity);
+        if (high.MaxGalvoDeviation > limit) return searchHigh;
+
+        double lo = searchLow, hi = searchHigh;
+        for (int i = 0; i < 18 && (hi - lo) > 0.05; i++)
         {
-            double mid = 0.5 * (fcLow + fcHigh);
-            var r = Decompose(traj, mid, galvoFov);
-            if (r.MaxGalvoDeviation <= limit) { best = r; fcHigh = mid; }
-            else fcLow = mid;
+            double mid = 0.5 * (lo + hi);
+            var r = Decompose(traj, mid, double.PositiveInfinity);
+            if (r.MaxGalvoDeviation <= limit) hi = mid;
+            else lo = mid;
         }
-        return best;
+        return hi;
+    }
+
+    /// <summary>二分搜索满足 GalvoMaxVelocity(fc) &lt;= limit 的最小 fc（振镜速度约束下界）。</summary>
+    private static double ComputeFcMinGalvoV(SampledTrajectory traj, double limit,
+        double searchLow, double searchHigh)
+    {
+        var low = Decompose(traj, searchLow, double.PositiveInfinity);
+        if (low.GalvoMaxVelocity <= limit) return searchLow;
+        var high = Decompose(traj, searchHigh, double.PositiveInfinity);
+        if (high.GalvoMaxVelocity > limit) return searchHigh;
+
+        double lo = searchLow, hi = searchHigh;
+        for (int i = 0; i < 18 && (hi - lo) > 0.05; i++)
+        {
+            double mid = 0.5 * (lo + hi);
+            var r = Decompose(traj, mid, double.PositiveInfinity);
+            if (r.GalvoMaxVelocity <= limit) hi = mid;
+            else lo = mid;
+        }
+        return hi;
+    }
+
+    /// <summary>二分搜索满足 StageMaxVelocity(fc) &lt;= limit 的最大 fc（平台速度约束上界）。</summary>
+    private static double ComputeFcMaxStageV(SampledTrajectory traj, double limit,
+        double searchLow, double searchHigh)
+    {
+        var high = Decompose(traj, searchHigh, double.PositiveInfinity);
+        if (high.StageMaxVelocity <= limit) return searchHigh;
+        var low = Decompose(traj, searchLow, double.PositiveInfinity);
+        if (low.StageMaxVelocity > limit) return searchLow;
+
+        double lo = searchLow, hi = searchHigh;
+        for (int i = 0; i < 18 && (hi - lo) > 0.05; i++)
+        {
+            double mid = 0.5 * (lo + hi);
+            var r = Decompose(traj, mid, double.PositiveInfinity);
+            if (r.StageMaxVelocity <= limit) lo = mid;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    /// <summary>二分搜索满足 StageMaxAcceleration(fc) &lt;= limit 的最大 fc（平台加速度约束上界）。</summary>
+    private static double ComputeFcMaxStageA(SampledTrajectory traj, double limit,
+        double searchLow, double searchHigh)
+    {
+        var high = Decompose(traj, searchHigh, double.PositiveInfinity);
+        if (high.StageMaxAcceleration <= limit) return searchHigh;
+        var low = Decompose(traj, searchLow, double.PositiveInfinity);
+        if (low.StageMaxAcceleration > limit) return searchLow;
+
+        double lo = searchLow, hi = searchHigh;
+        for (int i = 0; i < 18 && (hi - lo) > 0.05; i++)
+        {
+            double mid = 0.5 * (lo + hi);
+            var r = Decompose(traj, mid, double.PositiveInfinity);
+            if (r.StageMaxAcceleration <= limit) lo = mid;
+            else hi = mid;
+        }
+        return lo;
     }
 
     // ---------------- 二阶 Butterworth 低通 + 零相位滤波 ----------------
